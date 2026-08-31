@@ -1,0 +1,105 @@
+name: CI & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# GitHub Pages へのデプロイに必要な権限
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同時実行を1つに絞る（進行中のデプロイは中断しない）
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: 型チェック・Lint・テスト
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 依存インストール
+        run: pnpm install --frozen-lockfile
+
+      - name: 型チェック
+        run: pnpm exec tsc -b --force
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: テスト
+        run: pnpm test
+
+  build:
+    name: ビルド
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 依存インストール
+        run: pnpm install --frozen-lockfile
+
+      - name: ビルド
+        # GitHub Pages はリポジトリ名のサブパス配信になるため base を注入する。
+        # ユーザーサイト（<user>.github.io）の場合は自動的に "/" になる。
+        run: pnpm build
+        env:
+          BASE_PATH: ${{ github.event.repository.name == format('{0}.github.io', github.repository_owner) && '/' || format('/{0}/', github.event.repository.name) }}
+
+      - name: バンドルサイズを表示
+        run: |
+          echo "### バンドル構成" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          du -h dist/assets/* dist/index.html 2>/dev/null | sort -h >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "OCRエンジン(遅延取得): $(du -sh dist/vendor | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Service Worker が OCR エンジンをプリキャッシュしていないことを確認
+        # 9.4MB の OCR エンジンが初回インストール時に落ちてくると
+        # 「軽さ」の要件を満たさないため、CI で回帰を防ぐ
+        run: |
+          if grep -o 'precacheAndRoute(\[[^]]*\]' dist/sw.js | grep -q 'vendor'; then
+            echo "::error::OCRエンジンがプリキャッシュに含まれています"
+            exit 1
+          fi
+          echo "OK: プリキャッシュに vendor は含まれていません"
+
+      - name: Pages 用にアップロード
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: GitHub Pages へデプロイ
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
