@@ -5,7 +5,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { AppSettings } from '../store/db'
 import { clearRecords, countRecords } from '../store/records'
 import { useSettings } from '../store/useStore'
-import { preloadOcr } from '../scan/ocr'
+import { isStoragePersisted, requestStoragePersistence } from '../store/storagePersistence'
+import { preloadOcr, type OcrProgress } from '../scan/ocr'
 import { Button } from './components/Button'
 import { Field, Select, Switch, TextInput } from './components/Controls'
 import { Sheet } from './components/Sheet'
@@ -40,7 +41,7 @@ export function SettingsScreen() {
   }
 
   const [ocrDownloading, setOcrDownloading] = useState(false)
-  const [ocrElapsedSec, setOcrElapsedSec] = useState(0)
+  const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null)
   const [ocrReady, setOcrReady] = useState(false)
 
   const [clearOpen, setClearOpen] = useState(false)
@@ -49,6 +50,8 @@ export function SettingsScreen() {
   const [recordCount, setRecordCount] = useState<number | null>(null)
 
   const [storageInfo, setStorageInfo] = useState<{ usage: number; quota: number } | null>(null)
+  const [storagePersisted, setStoragePersisted] = useState<boolean | null>(null)
+  const [requestingPersistence, setRequestingPersistence] = useState(false)
 
   useEffect(() => {
     countRecords()
@@ -64,6 +67,21 @@ export function SettingsScreen() {
       .catch(() => setStorageInfo(null))
   }, [])
 
+  useEffect(() => {
+    isStoragePersisted().then(setStoragePersisted)
+  }, [])
+
+  async function handleRequestPersistence() {
+    setRequestingPersistence(true)
+    try {
+      const granted = await requestStoragePersistence()
+      setStoragePersisted(granted)
+      showToast(granted ? 'ストレージ保護が有効になりました' : '許可されませんでした', granted ? 'success' : 'error')
+    } finally {
+      setRequestingPersistence(false)
+    }
+  }
+
   function persist(patch: Partial<AppSettings>) {
     update(patch).catch(() => showToast('設定の保存に失敗しました', 'error'))
   }
@@ -76,17 +94,16 @@ export function SettingsScreen() {
 
   async function handlePreloadOcr() {
     setOcrDownloading(true)
-    setOcrElapsedSec(0)
-    const timer = window.setInterval(() => setOcrElapsedSec((s) => s + 1), 1000)
+    setOcrProgress(null)
     try {
-      await preloadOcr()
+      await preloadOcr((p) => setOcrProgress(p))
       setOcrReady(true)
       showToast('OCRエンジンの準備が完了しました', 'success')
     } catch {
       showToast('OCRエンジンの準備に失敗しました', 'error')
     } finally {
-      window.clearInterval(timer)
       setOcrDownloading(false)
+      setOcrProgress(null)
     }
   }
 
@@ -196,7 +213,9 @@ export function SettingsScreen() {
               </p>
               <Button variant="secondary" size="lg" loading={ocrDownloading} onClick={() => void handlePreloadOcr()}>
                 {ocrDownloading
-                  ? `ダウンロード中…（${ocrElapsedSec}秒経過）`
+                  ? ocrProgress
+                    ? `${ocrProgress.status}…（${Math.round(ocrProgress.progress * 100)}%）`
+                    : '準備中…'
                   : ocrReady
                     ? '準備完了（再ダウンロード）'
                     : 'OCRエンジンを事前ダウンロード'}
@@ -229,6 +248,27 @@ export function SettingsScreen() {
                   {formatBytes(storageInfo.usage)} / {formatBytes(storageInfo.quota)}
                 </span>
               </div>
+            )}
+            <div className="flex justify-between text-sm text-slate-300">
+              <span>ストレージ保護</span>
+              <span className={storagePersisted ? 'font-semibold text-emerald-400' : 'font-semibold text-amber-400'}>
+                {storagePersisted === null ? '確認中…' : storagePersisted ? '有効' : '無効'}
+              </span>
+            </div>
+            <p className="text-xs text-slate-500">
+              端末の空き容量が少なくなると、ブラウザが保存データを黙って消去することがあります。
+              「保護」を有効にすると消去されにくくなります（ブラウザが自動で許可することも、
+              ホーム画面に追加しないと許可されないこともあります）。
+            </p>
+            {!storagePersisted && (
+              <Button
+                variant="secondary"
+                size="md"
+                loading={requestingPersistence}
+                onClick={() => void handleRequestPersistence()}
+              >
+                ストレージ保護を要求
+              </Button>
             )}
             <p className="pt-1 text-xs text-slate-500">完全オフラインで動作します。通信は行いません。</p>
           </section>

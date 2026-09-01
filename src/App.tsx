@@ -5,6 +5,7 @@
 import { useState } from 'react'
 import { TabBar, type TabId } from './ui/components/TabBar'
 import { ToastHost } from './ui/components/Toast'
+import { UpdateBanner } from './ui/components/UpdateBanner'
 import { ScanScreen } from './ui/ScanScreen'
 import { HistoryScreen, type ExportRequest } from './ui/HistoryScreen'
 import { ExportScreen } from './ui/ExportScreen'
@@ -53,6 +54,7 @@ function App() {
 
       {!showExport && <TabBar active={tab} onChange={setTab} />}
       <ToastHost />
+      <UpdateBanner />
     </div>
   )
 }

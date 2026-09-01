@@ -9,7 +9,14 @@ import type { BarcodeBackend, BarcodeHit, BarcodeReader } from './barcode'
 
 export type UseBarcodeScannerOptions = {
   videoRef: RefObject<HTMLVideoElement | null>
+  /** フレームループを回すか（一時停止・オーバーレイ表示中は false にする） */
   enabled: boolean
+  /**
+   * 読み取りバックエンドを保持し続けるか（既定: enabled と同じ）。
+   * enabled と分離しておくことで、オーバーレイの開閉のたびに
+   * zxing の Worker を破棄・再生成する無駄を避けられる。
+   */
+  active?: boolean
   dedupeMs?: number
   /** 検出時のビープ音を鳴らすか（既定: true） */
   beep?: boolean
@@ -71,6 +78,7 @@ function playVibration(): void {
 export function useBarcodeScanner({
   videoRef,
   enabled,
+  active,
   dedupeMs = 1500,
   beep = true,
   vibrate = true,
@@ -108,9 +116,11 @@ export function useBarcodeScanner({
   // （クリーンアップ時に videoRef.current を直接読むと、登録時と別要素になり得るため）
   const registeredVideoRef = useRef<VideoWithFrameCallback | null>(null)
 
-  // バックエンド（ネイティブ / zxing-wasm）の準備。enabled が真の間だけ生成する。
+  // バックエンド（ネイティブ / zxing-wasm）の準備。
+  // 一時停止やオーバーレイ表示で enabled が落ちても保持し続け、再開を即座にする。
+  const readerActive = active ?? enabled
   useEffect(() => {
-    if (!enabled) return
+    if (!readerActive) return
     let cancelled = false
 
     createBarcodeReader()
@@ -135,7 +145,7 @@ export function useBarcodeScanner({
       readerRef.current = null
       setBackend(null)
     }
-  }, [enabled])
+  }, [readerActive])
 
   // フレームループ本体。setState は「新しい値が確定したとき」だけ呼ぶ。
   useEffect(() => {

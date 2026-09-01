@@ -6,30 +6,80 @@ import type { FieldValue, ParsedRecord, RawScan } from '../parse/types'
 import { applyProfile } from '../parse/engine'
 import { saveRecord } from '../store/records'
 import { useProfiles, useSettings } from '../store/useStore'
+import {
+  clearDraft,
+  countDraftScans,
+  isDraftNonEmpty,
+  loadDraft,
+  registerDraftFlush,
+  resolveDraftProfile,
+  saveDraft,
+  type ScanDraft,
+} from '../store/draft'
 import { useCamera } from '../camera/useCamera'
 import { useBarcodeScanner } from '../scan/useBarcodeScanner'
-import { preloadOcr, runOcr, type RoiRect } from '../scan/ocr'
+import { isAnyOverlayOpen, isBarcodeScanEnabled } from '../scan/scanGating'
+import {
+  captureRoi,
+  DEFAULT_OCR_OPTIONS,
+  hasOcrEngineCached,
+  preloadOcr,
+  recognizeCaptured,
+  type OcrProgress,
+  type RoiRect,
+} from '../scan/ocr'
 import { Button } from './components/Button'
 import { Sheet } from './components/Sheet'
-import { CheckIcon, FlashIcon, FlashOffIcon, ScanIcon, SpinnerIcon, WarningIcon } from './components/Icons'
+import {
+  CheckIcon,
+  CloseIcon,
+  FlashIcon,
+  FlashOffIcon,
+  PauseIcon,
+  PlayIcon,
+  ScanIcon,
+  SpinnerIcon,
+  WarningIcon,
+} from './components/Icons'
 import { showToast } from './components/toastBus'
 import { RecordSheet } from './RecordSheet'
 import { RawDataPanel } from './RawDataPanel'
 
+// 下書き保存のデバウンス間隔。連続バーストで IndexedDB を叩きすぎないための猶予。
+const DRAFT_SAVE_DEBOUNCE_MS = 400
+
 // ROI: 画面中央よりやや上。下部のパネルと重ならない位置に置く（相対座標 0..1）。
 const ROI: RoiRect = { x: 0.1, y: 0.26, w: 0.8, h: 0.18 }
+
+// 前処理済み ImageData をそのまま canvas に描画するだけの小さな表示コンポーネント。
+// 「実際に OCR エンジンへ渡された画像そのもの」を見せるため、映像から再度読み直したりはしない。
+function CapturedImageCanvas({ image, className }: { image: ImageData; className?: string }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    canvas.width = image.width
+    canvas.height = image.height
+    const ctx = canvas.getContext('2d')
+    ctx?.putImageData(image, 0, 0)
+  }, [image])
+
+  return <canvas ref={canvasRef} className={className} style={{ imageRendering: 'pixelated' }} />
+}
 
 type ScanScreenProps = {
   enabled: boolean
 }
 
 export function ScanScreen({ enabled }: ScanScreenProps) {
-  const { profiles, active, setActive } = useProfiles()
+  const { profiles, active, setActive, loading: profilesLoading } = useProfiles()
   const { settings } = useSettings()
   const camera = useCamera()
 
   const [rawScans, setRawScans] = useState<RawScan[]>([])
   const [fieldOverrides, setFieldOverrides] = useState<Record<string, RawScan>>({})
+  const [editingFieldKey, setEditingFieldKey] = useState<string | null>(null)
   const [profilePickerOpen, setProfilePickerOpen] = useState(false)
   const [rawPanelOpen, setRawPanelOpen] = useState(false)
   const [forceConfirmOpen, setForceConfirmOpen] = useState(false)
@@ -37,13 +87,28 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrBusyKey, setOcrBusyKey] = useState<string | null>(null)
   const [ocrInfo, setOcrInfo] = useState<{ ms: number; confidence: number } | null>(null)
+  const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null)
+  // シャッターを押した瞬間に確定させた「実際に OCR へ渡す画像」。結果が出たあとも
+  // ユーザーが消すか次のシャッターを押すまで表示し続け、同じ画像での再認識にも使う。
+  const [capturedImage, setCapturedImage] = useState<ImageData | null>(null)
+  const [showFirstUseHint, setShowFirstUseHint] = useState(!hasOcrEngineCached())
   const [saving, setSaving] = useState(false)
+
+  // バーコード検出の一時停止（ユーザーが明示的に操作した場合のみ）。
+  // オーバーレイの開閉とは独立して保持し、再開ボタンでのみ解除する。
+  const [manualPaused, setManualPaused] = useState(false)
+  // ブラウザタブ自体が前面表示中か。画面回転やアプリ切り替えでも正しく反映する。
+  const [pageVisible, setPageVisible] = useState(() => document.visibilityState === 'visible')
+
+  // 作業中データの復元バー。起動時に一度だけ下書きの有無を確認して表示する。
+  const [draftChecked, setDraftChecked] = useState(false)
+  const [pendingDraft, setPendingDraft] = useState<ScanDraft | null>(null)
 
   const preloadTriggeredRef = useRef(false)
   const ensureOcrPreloaded = useCallback(() => {
     if (preloadTriggeredRef.current) return
     preloadTriggeredRef.current = true
-    void preloadOcr()
+    void preloadOcr((p) => setOcrProgress(p))
   }, [])
 
   // enabled が変わったときだけカメラを起動/停止する。ScanScreen 自体は
@@ -58,13 +123,59 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled])
 
+  // ブラウザタブ自体の前面/背面をハンドリングする（アプリ内タブ切り替えとは別軸）。
+  useEffect(() => {
+    const handleVisibility = () => setPageVisible(document.visibilityState === 'visible')
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => document.removeEventListener('visibilitychange', handleVisibility)
+  }, [])
+
   const handleScan = useCallback((scan: RawScan) => {
     setRawScans((prev) => [...prev, scan])
   }, [])
 
+  // 「データ表示中もバーコードが読み取られ続ける」問題への対処: 生データパネル・
+  // フィールド編集・プロファイル選択・OCR結果表示・各種確認ダイアログのいずれかが
+  // 開いている間は、カメラは動かしたままバーコード検出だけを止める。
+  const overlaysOpen = useMemo(
+    () =>
+      isAnyOverlayOpen({
+        profilePickerOpen,
+        rawPanelOpen,
+        fieldEditorOpen: editingFieldKey !== null,
+        ocrResultPanelOpen: capturedImage !== null,
+        forceConfirmOpen,
+        clearConfirmOpen,
+        draftBannerOpen: pendingDraft !== null,
+      }),
+    [
+      profilePickerOpen,
+      rawPanelOpen,
+      editingFieldKey,
+      capturedImage,
+      forceConfirmOpen,
+      clearConfirmOpen,
+      pendingDraft,
+    ],
+  )
+
+  const scanEnabled = useMemo(
+    () =>
+      isBarcodeScanEnabled({
+        tabActive: enabled,
+        cameraReady: camera.ready,
+        pageVisible,
+        manualPaused,
+        overlaysOpen,
+      }),
+    [enabled, camera.ready, pageVisible, manualPaused, overlaysOpen],
+  )
+
   const { backend, error: scannerError } = useBarcodeScanner({
     videoRef: camera.videoRef,
-    enabled: enabled && camera.ready,
+    enabled: scanEnabled,
+    // バックエンドはタブが有効な間ずっと保持する（オーバーレイ開閉で作り直さない）
+    active: enabled && camera.ready,
     dedupeMs: settings?.dedupeMs ?? 1500,
     beep: settings?.beep ?? true,
     vibrate: settings?.vibrate ?? true,
@@ -74,6 +185,12 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
   useEffect(() => {
     if (scannerError) showToast(scannerError, 'error')
   }, [scannerError])
+
+  // プロファイルが切り替わったら、別プロファイルのフィールドを指したままの
+  // 編集状態を残さないようにする
+  useEffect(() => {
+    setEditingFieldKey(null)
+  }, [active?.id])
 
   const parsed: ParsedRecord | null = useMemo(() => {
     if (!active) return null
@@ -103,11 +220,113 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
     [rawScans, fieldOverrides],
   )
 
+  // --- 組み立て中バッファの下書き永続化（データ消失対策） ---
+  // rawScans / fieldOverrides の最新値を ref に保持し、変更のたびにデバウンスして
+  // IndexedDB へ書き出す。タブが裏に回った瞬間（visibilitychange → hidden）と
+  // pagehide では、デバウンスを待たずに即座に保存し切る。
+  const draftSnapshotRef = useRef<{
+    profileId: string
+    rawScans: RawScan[]
+    fieldOverrides: Record<string, RawScan>
+  } | null>(null)
+  const draftTimerRef = useRef<number | undefined>(undefined)
+
+  const flushDraftSave = useCallback((): Promise<void> => {
+    window.clearTimeout(draftTimerRef.current)
+    const snap = draftSnapshotRef.current
+    if (!snap || !isDraftNonEmpty(snap)) return Promise.resolve()
+    return saveDraft({ ...snap, updatedAt: Date.now() }).catch(() => {
+      // 下書き保存の失敗は致命的ではない（次の変更やタイマーで再試行される）
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!active) return
+    draftSnapshotRef.current = { profileId: active.id, rawScans, fieldOverrides }
+    window.clearTimeout(draftTimerRef.current)
+    draftTimerRef.current = window.setTimeout(() => {
+      void flushDraftSave()
+    }, DRAFT_SAVE_DEBOUNCE_MS)
+    return () => window.clearTimeout(draftTimerRef.current)
+  }, [active, rawScans, fieldOverrides, flushDraftSave])
+
+  // SW更新バナーなど、この画面の外側からも即時保存できるようにしておく
+  // （ScanScreen は常時マウントされているため、常に最新の flush 関数が登録される）。
+  useEffect(() => {
+    registerDraftFlush(flushDraftSave)
+    return () => registerDraftFlush(null)
+  }, [flushDraftSave])
+
+  // Android にタブを回収されやすい瞬間: 裏に回った直後とページ破棄の直前。
+  // デバウンスを待たず、ここで確実に保存し切る。
+  useEffect(() => {
+    const handleHidden = () => {
+      if (document.visibilityState === 'hidden') void flushDraftSave()
+    }
+    const handlePageHide = () => void flushDraftSave()
+    document.addEventListener('visibilitychange', handleHidden)
+    window.addEventListener('pagehide', handlePageHide)
+    return () => {
+      document.removeEventListener('visibilitychange', handleHidden)
+      window.removeEventListener('pagehide', handlePageHide)
+    }
+  }, [flushDraftSave])
+
+  // 起動時に一度だけ、保存済みの下書きがないか確認する（プロファイル一覧の
+  // 読み込みが終わってから: 下書きのプロファイルが現存するか判定するため）。
+  useEffect(() => {
+    if (draftChecked || profilesLoading) return
+    setDraftChecked(true)
+    loadDraft()
+      .then((draft) => {
+        if (draft && isDraftNonEmpty(draft)) setPendingDraft(draft)
+      })
+      .catch(() => {
+        // 下書きの読み込みに失敗しても致命的ではないため無視する
+      })
+  }, [draftChecked, profilesLoading])
+
+  const pendingDraftProfile = useMemo(
+    () => (pendingDraft ? resolveDraftProfile(pendingDraft, profiles) : undefined),
+    [pendingDraft, profiles],
+  )
+
+  const handleRestoreDraft = useCallback(async () => {
+    if (!pendingDraft || !pendingDraftProfile) return
+    if (pendingDraftProfile.id !== active?.id) {
+      await setActive(pendingDraftProfile.id)
+    }
+    setRawScans(pendingDraft.rawScans)
+    setFieldOverrides(pendingDraft.fieldOverrides)
+    setPendingDraft(null)
+    showToast('作業中のデータを復元しました', 'success')
+  }, [pendingDraft, pendingDraftProfile, active, setActive])
+
+  const handleDiscardDraft = useCallback(() => {
+    setPendingDraft(null)
+    void clearDraft().catch(() => {})
+  }, [])
+
   const resetBuffer = useCallback(() => {
+    window.clearTimeout(draftTimerRef.current)
+    draftSnapshotRef.current = null
     setRawScans([])
     setFieldOverrides({})
+    setEditingFieldKey(null)
     setOcrInfo(null)
+    setCapturedImage(null)
+    void clearDraft().catch(() => {})
   }, [])
+
+  // 設定未読み込み時（settings が null）だけ既定値にフォールバックする。
+  // 読み込み済みなら、ユーザーが空欄を選んでいてもそのまま尊重する。
+  const ocrOptions = useMemo(
+    () => ({
+      whitelist: settings?.ocrWhitelist ?? DEFAULT_OCR_OPTIONS.whitelist,
+      psm: settings?.ocrPsm ?? DEFAULT_OCR_OPTIONS.psm,
+    }),
+    [settings],
+  )
 
   const doSave = useCallback(async () => {
     if (!active || !parsed) return
@@ -144,31 +363,56 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
     setClearConfirmOpen(true)
   }, [rawScans.length, fieldOverrides])
 
-  const handleShutterOcr = useCallback(async () => {
+  // 実際に認識にかけている ImageData を渡して結果を rawScans に積む共通処理。
+  // シャッター押下の初回認識・「同じ画像で再認識」のどちらからも呼ぶ。
+  const runRecognition = useCallback(
+    (image: ImageData) => {
+      setOcrBusy(true)
+      setOcrProgress(null)
+      recognizeCaptured(image, ocrOptions, (p) => setOcrProgress(p))
+        .then((result) => {
+          setShowFirstUseHint(false)
+          setOcrInfo({ ms: result.ms, confidence: result.confidence })
+          if (result.text.trim().length === 0) {
+            showToast('文字を読み取れませんでした', 'error')
+          } else {
+            setRawScans((prev) => [...prev, { value: result.text, source: 'ocr', at: Date.now() }])
+          }
+        })
+        .catch(() => showToast('OCRに失敗しました', 'error'))
+        .finally(() => {
+          setOcrBusy(false)
+          setOcrProgress(null)
+        })
+    },
+    [ocrOptions],
+  )
+
+  const handleShutterOcr = useCallback(() => {
     const video = camera.videoRef.current
     if (!video || !camera.ready) {
       showToast('カメラの準備ができていません', 'error')
       return
     }
+    // シャッターが押された「その瞬間」の映像を、await をまたぐ前に同期的に確定させる。
+    // これにより「どのタイミングの画像を読んでいるか」が一意に決まる。
+    const image = captureRoi(video, ROI)
+    setCapturedImage(image)
+    setOcrInfo(null)
     ensureOcrPreloaded()
-    setOcrBusy(true)
-    try {
-      const result = await runOcr(video, ROI, {
-        whitelist: settings?.ocrWhitelist ?? '',
-        psm: settings?.ocrPsm ?? '6',
-      })
-      setOcrInfo({ ms: result.ms, confidence: result.confidence })
-      if (result.text.trim().length === 0) {
-        showToast('文字を読み取れませんでした', 'error')
-      } else {
-        setRawScans((prev) => [...prev, { value: result.text, source: 'ocr', at: Date.now() }])
-      }
-    } catch {
-      showToast('OCRに失敗しました', 'error')
-    } finally {
-      setOcrBusy(false)
-    }
-  }, [camera.videoRef, camera.ready, ensureOcrPreloaded, settings])
+    runRecognition(image)
+  }, [camera.videoRef, camera.ready, ensureOcrPreloaded, runRecognition])
+
+  // 撮影しなおさず、現在の設定（PSM・ホワイトリスト）で同じ画像を読み直す
+  const handleRetrySameImage = useCallback(() => {
+    if (!capturedImage) return
+    runRecognition(capturedImage)
+  }, [capturedImage, runRecognition])
+
+  const handleDismissCapturedImage = useCallback(() => {
+    setCapturedImage(null)
+    setOcrInfo(null)
+  }, [])
 
   const handleFieldOcr = useCallback(
     (key: string) => {
@@ -177,9 +421,11 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
         showToast('カメラの準備ができていません', 'error')
         return
       }
+      // こちらもシャッター同様、押した瞬間の映像を同期的に確定させてから認識する
+      const image = captureRoi(video, ROI)
       ensureOcrPreloaded()
       setOcrBusyKey(key)
-      runOcr(video, ROI, { whitelist: settings?.ocrWhitelist ?? '', psm: settings?.ocrPsm ?? '6' })
+      recognizeCaptured(image, ocrOptions)
         .then((result) => {
           if (result.text.trim().length === 0) {
             showToast('文字を読み取れませんでした', 'error')
@@ -190,7 +436,7 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
         .catch(() => showToast('OCRに失敗しました', 'error'))
         .finally(() => setOcrBusyKey(null))
     },
-    [camera.videoRef, camera.ready, ensureOcrPreloaded, settings],
+    [camera.videoRef, camera.ready, ensureOcrPreloaded, ocrOptions],
   )
 
   const handleManualEdit = useCallback((key: string, value: string) => {
@@ -209,6 +455,34 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
 
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-black">
+      {/* 作業中データの復元バー: 起動直後に下書きが見つかった場合だけ表示する。
+          自動では復元せず、必ずユーザーに選ばせる。 */}
+      {pendingDraft && (
+        <div
+          className="absolute inset-x-0 top-0 z-40 flex flex-col gap-2 bg-amber-400 p-3 text-slate-950 shadow-lg"
+          style={{ paddingTop: 'calc(env(safe-area-inset-top) + 0.5rem)' }}
+        >
+          <p className="text-sm font-bold">
+            作業中のデータがあります（バーコード{countDraftScans(pendingDraft)}件）
+          </p>
+          {!pendingDraftProfile && (
+            <p className="text-xs font-semibold">
+              使用していたラベル定義は削除されているため復元できません
+            </p>
+          )}
+          <div className="flex gap-2">
+            {pendingDraftProfile && (
+              <Button variant="primary" size="md" className="flex-1" onClick={() => void handleRestoreDraft()}>
+                復元
+              </Button>
+            )}
+            <Button variant="secondary" size="md" className="flex-1" onClick={handleDiscardDraft}>
+              破棄
+            </Button>
+          </div>
+        </div>
+      )}
+
       <video ref={camera.videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
 
       {!camera.error && (
@@ -222,6 +496,17 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
             boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)',
           }}
         >
+          {/* OCR実行中は、実際に読み取っている静止画をこの枠内に重ねて表示する。
+              「今どのタイミングの画像を処理しているか」が一目でわかるようにするための演出。 */}
+          {ocrBusy && capturedImage && (
+            <div className="absolute inset-0 overflow-hidden rounded-lg bg-black">
+              <CapturedImageCanvas image={capturedImage} className="h-full w-full" />
+              <div className="absolute inset-0 flex items-center justify-center gap-2 bg-slate-950/40">
+                <SpinnerIcon className="h-5 w-5 text-cyan-300" />
+                <span className="text-xs font-semibold text-cyan-100">この画像を読み取り中…</span>
+              </div>
+            </div>
+          )}
           <span className="absolute -left-0.5 -top-0.5 h-5 w-5 rounded-tl border-l-4 border-t-4 border-cyan-300" />
           <span className="absolute -right-0.5 -top-0.5 h-5 w-5 rounded-tr border-r-4 border-t-4 border-cyan-300" />
           <span className="absolute -bottom-0.5 -left-0.5 h-5 w-5 rounded-bl border-b-4 border-l-4 border-cyan-300" />
@@ -236,6 +521,16 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
           <Button variant="primary" size="lg" onClick={() => void camera.start()}>
             再試行
           </Button>
+        </div>
+      )}
+
+      {/* 一時停止中は、カメラ映像は動かしたまま「読み取りは止まっている」ことを
+          見誤りようがない形で示す。OCRシャッター自体はこのバッジと無関係に使える。 */}
+      {manualPaused && !camera.error && (
+        <div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 flex -translate-y-1/2 justify-center px-4">
+          <span className="flex items-center gap-2 rounded-full bg-red-600/95 px-4 py-2 text-sm font-bold text-white shadow-xl">
+            <PauseIcon className="h-4 w-4" /> 読み取り停止中
+          </span>
         </div>
       )}
 
@@ -255,6 +550,19 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
           <span className="rounded-lg bg-slate-900/80 px-2 py-1.5 text-[11px] font-semibold text-slate-300">
             BC: {backendLabel}
           </span>
+          {/* 一時停止/再開トグル: カメラは止めずバーコード検出だけを止める。
+              OCRシャッターやフィールド編集は一時停止中でも使える。 */}
+          <button
+            type="button"
+            onClick={() => setManualPaused((p) => !p)}
+            aria-pressed={manualPaused}
+            className={`flex min-h-10 items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold ${
+              manualPaused ? 'bg-amber-400 text-slate-950' : 'bg-slate-900/80 text-slate-200'
+            }`}
+          >
+            {manualPaused ? <PlayIcon className="h-4 w-4" /> : <PauseIcon className="h-4 w-4" />}
+            {manualPaused ? '再開' : '一時停止'}
+          </button>
           {camera.torchSupported && (
             <button
               type="button"
@@ -271,13 +579,54 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
       <div className="relative z-10 flex-1" />
 
       {/* OCR シャッター */}
-      <div className="relative z-20 flex flex-col items-center gap-1 pb-3">
-        {ocrInfo && (
-          <span className="rounded bg-slate-900/80 px-2 py-0.5 text-[11px] text-slate-400">
-            {ocrInfo.ms}ms / 信頼度 {Math.round(ocrInfo.confidence)}%
-          </span>
+      <div className="relative z-20 flex flex-col items-center gap-2 px-4 pb-3">
+        {/* 初回利用の案内: エンジンをまだ端末にキャッシュしていないときだけ表示する */}
+        {showFirstUseHint && !ocrBusy && (
+          <p className="max-w-xs text-center text-[11px] text-slate-400">
+            初回のみOCRエンジン（約9MB）をダウンロードします。次回からはオフラインで利用できます。
+          </p>
         )}
-        <Button variant="primary" size="lg" loading={ocrBusy} onClick={() => void handleShutterOcr()} className="shadow-xl">
+
+        {/* 進捗表示: ダウンロード・初期化・認識のいずれの段階かを日本語で示す */}
+        {ocrBusy && ocrProgress && (
+          <div className="flex w-full max-w-xs items-center gap-2 rounded bg-slate-900/80 px-3 py-1.5 text-[11px] text-cyan-100">
+            <SpinnerIcon className="h-3.5 w-3.5 shrink-0" />
+            <span className="flex-1 truncate">{ocrProgress.status}</span>
+            <span className="tabular-nums">{Math.round(ocrProgress.progress * 100)}%</span>
+          </div>
+        )}
+
+        {/* 直近の読み取り結果: 実際に認識器へ渡した画像そのものを並べて表示する */}
+        {!ocrBusy && capturedImage && ocrInfo && (
+          <div className="flex w-full max-w-xs items-center gap-2 rounded-lg bg-slate-900/90 p-2">
+            <div className="shrink-0 overflow-hidden rounded border border-slate-700 bg-black">
+              <CapturedImageCanvas image={capturedImage} className="h-12 w-28 object-contain" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] text-slate-500">読み取った画像</p>
+              <p className="truncate text-[11px] text-slate-300">
+                {ocrInfo.ms}ms / 信頼度 {Math.round(ocrInfo.confidence)}%
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleRetrySameImage}
+              className="shrink-0 rounded bg-slate-700 px-2 py-1 text-[11px] font-semibold text-slate-100 active:bg-slate-600"
+            >
+              同じ画像で再認識
+            </button>
+            <button
+              type="button"
+              onClick={handleDismissCapturedImage}
+              aria-label="読み取り結果を閉じる"
+              className="shrink-0 rounded-full p-1 text-slate-400 active:bg-slate-700"
+            >
+              <CloseIcon className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+
+        <Button variant="primary" size="lg" loading={ocrBusy} onClick={handleShutterOcr} className="shadow-xl">
           {!ocrBusy && <ScanIcon className="h-5 w-5" />} 枠内をOCR
         </Button>
       </div>
@@ -296,6 +645,8 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
               onFieldOcr={handleFieldOcr}
               onClearField={handleClearField}
               ocrBusyKey={ocrBusyKey}
+              editingKey={editingFieldKey}
+              onEditingKeyChange={setEditingFieldKey}
             />
           ) : (
             <p className="p-4 text-center text-sm text-slate-500">ラベル定義を読み込み中…</p>

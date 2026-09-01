@@ -1,5 +1,7 @@
 // スキャン画面に常駐する「組み立て中レコード」表示パネル。
 // プロファイルの各フィールドを1行ずつ表示し、タップで手入力/部分OCR/クリアができる。
+// どのフィールドを編集中かは ScanScreen 側で保持する（バーコード読み取りの
+// 一時停止判定にこの開閉状態を使うため、内部 state に閉じ込めない）。
 
 import { useState } from 'react'
 import type { FieldRule, FieldValue } from '../parse/types'
@@ -18,6 +20,8 @@ type RecordSheetProps = {
   onFieldOcr: (key: string) => void
   onClearField: (key: string) => void
   ocrBusyKey: string | null
+  editingKey: string | null
+  onEditingKeyChange: (key: string | null) => void
 }
 
 type RowEditorProps = {
@@ -80,9 +84,9 @@ export function RecordSheet({
   onFieldOcr,
   onClearField,
   ocrBusyKey,
+  editingKey,
+  onEditingKeyChange,
 }: RecordSheetProps) {
-  const [editingKey, setEditingKey] = useState<string | null>(null)
-
   if (fields.length === 0) {
     return (
       <div className="p-4 text-center text-sm text-slate-500">
@@ -104,7 +108,7 @@ export function RecordSheet({
             <li key={field.id}>
               <button
                 type="button"
-                onClick={() => setEditingKey(isEditing ? null : field.key)}
+                onClick={() => onEditingKeyChange(isEditing ? null : field.key)}
                 className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left active:bg-slate-800/60"
               >
                 <div className="min-w-0 flex-1">
@@ -145,7 +149,7 @@ export function RecordSheet({
                   onManualEdit={(value) => onManualEdit(field.key, value)}
                   onFieldOcr={() => onFieldOcr(field.key)}
                   onClearField={() => onClearField(field.key)}
-                  onClose={() => setEditingKey(null)}
+                  onClose={() => onEditingKeyChange(null)}
                 />
               )}
             </li>

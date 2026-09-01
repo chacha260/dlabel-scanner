@@ -14,7 +14,10 @@ export default defineConfig({
     react(),
     tailwindcss(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // 'autoUpdate' は無警告でページをリロードしてしまい、スキャン中の作業を
+      // 壊す恐れがあるため 'prompt' にする。更新の適用は UpdateBanner から
+      // ユーザーが明示的に操作したときのみ行う（main.tsx を参照）。
+      registerType: 'prompt',
       includeAssets: ['icons/apple-touch-icon.png'],
       manifest: {
         name: 'Dラベル スキャナ',
