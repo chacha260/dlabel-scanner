@@ -48,6 +48,8 @@ import { copyToClipboard, sourceBadgeClass, sourceBadgeLabel } from './lib'
 const HelpSheet = lazy(() => import('./HelpSheet'))
 
 // バーコード検出時のビープ/バイブ/連続無視時間。設定画面がないため既定値を固定で使う。
+// 同じ値のバーコードを二重に追加しない時間。
+// 変更した場合は HelpSheet.tsx の「バーコードを読む」の記載も合わせること
 const DEDUPE_MS = 1500
 
 // ROI 枠のリサイズハンドル定義（表示上の位置と、掴んだときのカーソル形状）。

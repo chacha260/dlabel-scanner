@@ -90,7 +90,16 @@ export default function HelpSheet({ onClose }: HelpSheetProps) {
 
         <Section title="バーコードを読む">
           <p>特別な操作はいりません。カメラをバーコードに向けるだけで、自動的に・繰り返し読み取って一覧に追加していきます。</p>
-          <p>同じバーコードを続けて読んでも、短い時間の間は二重に追加されません。</p>
+          <p>
+            カメラ映像は<strong className="text-slate-100">毎秒最大10回</strong>（0.1秒ごと）解析しています。
+            端末の処理が追いつかないときは、そのぶん自動的に間引くため、動作が重くなることはありません。
+          </p>
+          <p>
+            同じバーコードは、一度読み取ってから
+            <strong className="text-slate-100">1.5秒</strong>のあいだ二重に追加されません。
+            これは<strong className="text-slate-100">同じ値のときだけ</strong>で、別のバーコードなら待たずにすぐ追加されます。
+            続けて何本も読むときに待たされることはありません。
+          </p>
           <p>
             <ButtonRef icon={<SoundOnIcon className="h-4 w-4" />}>音</ButtonRef>
             のボタンで読み取り音のON/OFFを切り替えられます。

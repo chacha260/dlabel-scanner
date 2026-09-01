@@ -39,7 +39,8 @@ export type UseBarcodeScannerResult = {
   detectBoxes: (source: OffscreenCanvas) => Promise<NormalizedRect[]>
 }
 
-const FRAME_INTERVAL_MS = 100 // 10fps 上限
+// 10fps 上限。変更した場合は HelpSheet.tsx の「バーコードを読む」の記載も合わせること
+const FRAME_INTERVAL_MS = 100
 const LONG_EDGE_PX = 720
 
 // requestVideoFrameCallback の型は DOM 標準にあるが、rVFC 非対応環境向けの
