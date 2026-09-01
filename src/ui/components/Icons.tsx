@@ -185,3 +185,21 @@ export function PlayIcon({ className = base }: IconProps) {
     </svg>
   )
 }
+
+export function SoundOnIcon({ className = base }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={className}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 9v6h4l5 4V5L8 9H4Z" />
+      <path strokeLinecap="round" d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" />
+    </svg>
+  )
+}
+
+export function SoundOffIcon({ className = base }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={className}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M4 9v6h4l5 4V5L8 9H4Z" />
+      <path strokeLinecap="round" d="m16 9 5 6m0-6-5 6" />
+    </svg>
+  )
+}

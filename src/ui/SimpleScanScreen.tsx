@@ -14,6 +14,7 @@ import type { NormalizedRect } from '../scan/barcode/types'
 import { useCamera } from '../camera/useCamera'
 import { useBarcodeScanner } from '../scan/useBarcodeScanner'
 import { isAnyOverlayOpen, isBarcodeScanEnabled } from '../scan/scanGating'
+import { loadSoundEnabled, saveSoundEnabled } from './prefs'
 import {
   applyOcrFilter,
   boxesToMask,
@@ -37,13 +38,11 @@ import {
 } from '../scan/ocr'
 import { Button } from './components/Button'
 import { Select, Switch } from './components/Controls'
-import { CloseIcon, CopyIcon, FlashIcon, FlashOffIcon, PauseIcon, PlayIcon, ScanIcon, SpinnerIcon, WarningIcon } from './components/Icons'
+import { CloseIcon, CopyIcon, FlashIcon, FlashOffIcon, PauseIcon, PlayIcon, ScanIcon, SoundOffIcon, SoundOnIcon, SpinnerIcon, WarningIcon } from './components/Icons'
 import { showToast } from './components/toastBus'
 import { copyToClipboard, sourceBadgeClass, sourceBadgeLabel } from './lib'
 
 // バーコード検出時のビープ/バイブ/連続無視時間。設定画面がないため既定値を固定で使う。
-const BEEP_ENABLED = true
-const VIBRATE_ENABLED = true
 const DEDUPE_MS = 1500
 
 // ROI 枠のリサイズハンドル定義（表示上の位置と、掴んだときのカーソル形状）。
@@ -140,6 +139,7 @@ export function SimpleScanScreen() {
   // OCR枠（表示座標、0..1）。移動・リサイズ可能で、矩形だけ localStorage に永続化する
   // （これは UI 上の好み設定であり、スキャン結果自体はこれまで通りメモリ上のみ）。
   const [roi, setRoi] = useState<RoiRect>(() => loadPersistedRoi())
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(loadSoundEnabled)
   const [isDraggingRoi, setIsDraggingRoi] = useState(false)
   const previewRef = useRef<HTMLDivElement | null>(null)
   // ドラッグ中に確定した最新の ROI を、setState のタイミングに左右されず
@@ -240,6 +240,14 @@ export function SimpleScanScreen() {
     savePersistedRoi(latestRoiRef.current)
   }, [])
 
+  const handleToggleSound = useCallback(() => {
+    setSoundEnabled((prev) => {
+      const next = !prev
+      saveSoundEnabled(next)
+      return next
+    })
+  }, [])
+
   const handleResetRoi = useCallback(() => {
     latestRoiRef.current = DEFAULT_ROI
     setRoi(DEFAULT_ROI)
@@ -272,8 +280,8 @@ export function SimpleScanScreen() {
     // バックエンドは画面が有効な間ずっと保持する（オーバーレイ開閉で作り直さない）
     active: camera.ready,
     dedupeMs: DEDUPE_MS,
-    beep: BEEP_ENABLED,
-    vibrate: VIBRATE_ENABLED,
+    beep: soundEnabled,
+    vibrate: true,
     onScan: handleScan,
   })
 
@@ -597,6 +605,18 @@ export function SimpleScanScreen() {
           <Button variant="primary" size="lg" loading={ocrBusy} onClick={handleShutterOcr} className="flex-1 shadow-xl">
             {!ocrBusy && <ScanIcon className="h-5 w-5" />} 枠内をOCR
           </Button>
+
+          <button
+            type="button"
+            onClick={handleToggleSound}
+            aria-label="読み取り音を切り替える"
+            aria-pressed={soundEnabled}
+            className={`flex min-h-14 items-center justify-center rounded-xl px-3 ${
+              soundEnabled ? 'bg-slate-800 text-slate-200' : 'bg-slate-800 text-slate-500'
+            }`}
+          >
+            {soundEnabled ? <SoundOnIcon className="h-5 w-5" /> : <SoundOffIcon className="h-5 w-5" />}
+          </button>
 
           {camera.torchSupported && (
             <button
