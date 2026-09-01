@@ -8,13 +8,13 @@
 // 設定画面などの既存機能は src/ui/legacy 以下に退避してあり、削除はしていない。
 
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RawScan } from '../parse/types'
 import type { NormalizedRect } from '../scan/barcode/types'
 import { useCamera } from '../camera/useCamera'
 import { useBarcodeScanner } from '../scan/useBarcodeScanner'
 import { isAnyOverlayOpen, isBarcodeScanEnabled } from '../scan/scanGating'
-import { loadSoundEnabled, saveSoundEnabled } from './prefs'
+import { loadHelpSeen, loadSoundEnabled, markHelpSeen, saveSoundEnabled } from './prefs'
 import {
   applyOcrFilter,
   boxesToMask,
@@ -42,6 +42,10 @@ import { Select, Switch } from './components/Controls'
 import { CloseIcon, CopyIcon, FlashIcon, FlashOffIcon, PauseIcon, PlayIcon, ScanIcon, SoundOffIcon, SoundOnIcon, SpinnerIcon, WarningIcon } from './components/Icons'
 import { showToast } from './components/toastBus'
 import { copyToClipboard, sourceBadgeClass, sourceBadgeLabel } from './lib'
+
+// 使い方（ヘルプ）パネルはエントリーチャンクを太らせないよう別チャンクにする
+// （初回表示までに読み込めていればよく、常に即必要というわけではないため）。
+const HelpSheet = lazy(() => import('./HelpSheet'))
 
 // バーコード検出時のビープ/バイブ/連続無視時間。設定画面がないため既定値を固定で使う。
 const DEDUPE_MS = 1500
@@ -124,6 +128,11 @@ export function SimpleScanScreen() {
   const [manualPaused, setManualPaused] = useState(false)
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState === 'visible')
 
+  // 使い方（ヘルプ）パネル。初めて開いたときだけ自動表示し、以降は「?」ボタンで
+  // 手動で開く。開いている間はカメラがどこを向いているか分からなくなるため、
+  // isAnyOverlayOpen 経由でバーコード検出を止める（下の overlaysOpen を参照）。
+  const [helpOpen, setHelpOpen] = useState(false)
+
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null)
   const [ocrInfo, setOcrInfo] = useState<{ ms: number; confidence: number } | null>(null)
@@ -184,6 +193,17 @@ export function SimpleScanScreen() {
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [])
 
+  // 初めての起動時だけ、使い方パネルを自動で開く（以降は「?」ボタンで手動オープン）
+  useEffect(() => {
+    if (!loadHelpSeen()) {
+      setHelpOpen(true)
+      markHelpSeen()
+    }
+  }, [])
+
+  const handleOpenHelp = useCallback(() => setHelpOpen(true), [])
+  const handleCloseHelp = useCallback(() => setHelpOpen(false), [])
+
   const appendResult = useCallback((source: ResultItem['source'], raw: string, format?: string) => {
     const id = nextIdRef.current++
     setResults((prev) => [{ id, source, raw, format, at: Date.now() }, ...prev])
@@ -201,7 +221,7 @@ export function SimpleScanScreen() {
   // （タッチでもマウスでも同じコードで動く）。handle を渡すとリサイズ、渡さなければ移動。
   const beginRoiDrag = useCallback(
     (e: ReactPointerEvent<HTMLElement>, handle?: HandleId) => {
-      if (ocrBusy) return // OCR実行中は枠のプレビューを表示中なのでドラッグさせない
+      if (ocrBusy || helpOpen) return // OCR実行中・使い方パネル表示中は枠をドラッグさせない
       const container = previewRef.current
       if (!container) return
       e.stopPropagation()
@@ -217,7 +237,7 @@ export function SimpleScanScreen() {
       }
       setIsDraggingRoi(true)
     },
-    [ocrBusy, roi],
+    [ocrBusy, helpOpen, roi],
   )
 
   const updateRoiDrag = useCallback((e: ReactPointerEvent<HTMLElement>) => {
@@ -255,13 +275,15 @@ export function SimpleScanScreen() {
     savePersistedRoi(DEFAULT_ROI)
   }, [])
 
-  // この画面に実在するオーバーレイは「OCR結果カード」だけ（一覧・確認ダイアログ・
-  // プロファイル選択などはこの画面には存在しない）。isAnyOverlayOpen は汎用の
-  // 純粋関数のまま流用し、渡すフラグだけを実在するものに絞る。
-  // 止めるのは「認識処理中」だけにする。結果カードはカメラ映像の下に並ぶだけで
-  // 視界を塞がないため、表示されている間ずっと検出を止めると
+  // この画面に実在するオーバーレイは「OCR結果カード」と「使い方パネル」の2つだけ
+  // （一覧・確認ダイアログ・プロファイル選択などはこの画面には存在しない）。
+  // isAnyOverlayOpen は汎用の純粋関数のまま流用し、渡すフラグだけを実在するものに絞る。
+  // OCR結果カードで止めるのは「認識処理中」だけにする。結果カードはカメラ映像の下に
+  // 並ぶだけで視界を塞がないため、表示されている間ずっと検出を止めると
   // 一度 OCR しただけでバーコードが読めなくなってしまう。
-  const overlaysOpen = useMemo(() => isAnyOverlayOpen({ ocrResultPanelOpen: ocrBusy }), [ocrBusy])
+  // 使い方パネルは全画面表示でカメラがどこを向いているか分からなくなるため、
+  // 開いている間は常にバーコード検出を止める。
+  const overlaysOpen = useMemo(() => isAnyOverlayOpen({ ocrResultPanelOpen: ocrBusy, helpOpen }), [ocrBusy, helpOpen])
 
   const scanEnabled = useMemo(
     () =>
@@ -320,6 +342,7 @@ export function SimpleScanScreen() {
 
   const handleShutterOcr = useCallback(() => {
     if (isDraggingRoi) return // 枠をドラッグ中に誤ってシャッターが走らないようにする
+    if (helpOpen) return // 使い方パネル表示中は誤操作防止のためOCRを起動しない
     const video = camera.videoRef.current
     if (!video || !camera.ready) {
       showToast('カメラの準備ができていません', 'error')
@@ -352,7 +375,7 @@ export function SimpleScanScreen() {
       setMaskedCount(useMask ? maskRects.length : 0)
       runRecognition(image)
     })
-  }, [isDraggingRoi, camera.videoRef, camera.ready, roi, ensureOcrPreloaded, detectBoxes, autoMaskEnabled, runRecognition])
+  }, [isDraggingRoi, helpOpen, camera.videoRef, camera.ready, roi, ensureOcrPreloaded, detectBoxes, autoMaskEnabled, runRecognition])
 
   // 撮影しなおさず、現在の PSM・マスク設定で同じ静止フレームを読み直す
   // （フィルタはここでは無関係）。マスクON/OFFの切り替え後の比較にもこれを使う。
@@ -404,6 +427,18 @@ export function SimpleScanScreen() {
 
   return (
     <div className="flex h-full flex-col bg-slate-950 text-slate-100">
+      {/* 使い方（ヘルプ）ボタン。画面のどの状態（カメラエラー中なども含む）でも
+          必ず押せるよう、他の要素より上のレイヤーに固定表示する（実質的な「上部バー」）。 */}
+      <button
+        type="button"
+        onClick={handleOpenHelp}
+        aria-label="使い方を開く"
+        className="fixed right-3 z-40 flex h-11 w-11 items-center justify-center rounded-full bg-slate-900/90 text-lg font-bold text-slate-100 shadow-lg active:bg-slate-800"
+        style={{ top: 'calc(env(safe-area-inset-top) + 0.5rem)' }}
+      >
+        ?
+      </button>
+
       {/* カメラ映像（画面上部） */}
       <div ref={previewRef} className="relative shrink-0 overflow-hidden bg-black" style={{ height: '42vh' }}>
         <video ref={camera.videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
@@ -484,7 +519,8 @@ export function SimpleScanScreen() {
           </div>
         )}
 
-        <span className="absolute right-2 top-2 rounded-lg bg-slate-900/80 px-2 py-1 text-[10px] font-semibold text-slate-300">
+        {/* 右上は固定表示の「?」ヘルプボタンと重なるため、その分だけ左に寄せる */}
+        <span className="absolute right-14 top-2 rounded-lg bg-slate-900/80 px-2 py-1 text-[10px] font-semibold text-slate-300">
           BC: {backendLabel}
         </span>
 
@@ -607,7 +643,14 @@ export function SimpleScanScreen() {
             {manualPaused ? '再開' : '一時停止'}
           </button>
 
-          <Button variant="primary" size="lg" loading={ocrBusy} onClick={handleShutterOcr} className="flex-1 shadow-xl">
+          <Button
+            variant="primary"
+            size="lg"
+            loading={ocrBusy}
+            disabled={helpOpen}
+            onClick={handleShutterOcr}
+            className="flex-1 shadow-xl"
+          >
             {!ocrBusy && <ScanIcon className="h-5 w-5" />} 枠内をOCR
           </Button>
 
@@ -696,6 +739,19 @@ export function SimpleScanScreen() {
           クリア
         </Button>
       </div>
+
+      {/* 使い方パネル。別チャンクなので、開くまでは読み込まれない */}
+      {helpOpen && (
+        <Suspense
+          fallback={
+            <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950">
+              <SpinnerIcon className="h-8 w-8 text-slate-400" />
+            </div>
+          }
+        >
+          <HelpSheet onClose={handleCloseHelp} />
+        </Suspense>
+      )}
     </div>
   )
 }

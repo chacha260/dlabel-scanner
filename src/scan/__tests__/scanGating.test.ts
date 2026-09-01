@@ -10,6 +10,7 @@ function allClosed(): OverlayFlags {
     forceConfirmOpen: false,
     clearConfirmOpen: false,
     draftBannerOpen: false,
+    helpOpen: false,
   }
 }
 
@@ -26,6 +27,7 @@ describe('isAnyOverlayOpen', () => {
     'forceConfirmOpen',
     'clearConfirmOpen',
     'draftBannerOpen',
+    'helpOpen',
   ]
 
   for (const key of overlayKeys) {
@@ -78,5 +80,30 @@ describe('isBarcodeScanEnabled', () => {
   it('手動一時停止中はオーバーレイが閉じていても true に戻らない', () => {
     const result = isBarcodeScanEnabled({ ...baseInputs, manualPaused: true, overlaysOpen: false })
     expect(result).toBe(false)
+  })
+})
+
+describe('helpOpen（使い方パネル）と isBarcodeScanEnabled の組み合わせ', () => {
+  const baseInputs = {
+    tabActive: true,
+    cameraReady: true,
+    pageVisible: true,
+    manualPaused: false,
+    overlaysOpen: false,
+  }
+
+  it('ヘルプを開くとバーコード検出が無効になる', () => {
+    const overlaysOpen = isAnyOverlayOpen({ helpOpen: true })
+    expect(isBarcodeScanEnabled({ ...baseInputs, overlaysOpen })).toBe(false)
+  })
+
+  it('ヘルプを閉じると検出が再開する（手動一時停止でない場合）', () => {
+    const overlaysOpen = isAnyOverlayOpen({ helpOpen: false })
+    expect(isBarcodeScanEnabled({ ...baseInputs, overlaysOpen })).toBe(true)
+  })
+
+  it('手動一時停止中はヘルプを閉じても検出は再開しない', () => {
+    const overlaysOpen = isAnyOverlayOpen({ helpOpen: false })
+    expect(isBarcodeScanEnabled({ ...baseInputs, manualPaused: true, overlaysOpen })).toBe(false)
   })
 })

@@ -23,6 +23,8 @@ export type OverlayFlags = {
   clearConfirmOpen?: boolean
   /** 起動時の「作業中のデータがあります」復元バー（ユーザーの選択待ち） */
   draftBannerOpen?: boolean
+  /** 使い方（ヘルプ）パネルを全画面表示している状態 */
+  helpOpen?: boolean
 }
 
 /** いずれかのオーバーレイが開いているか */
@@ -34,7 +36,8 @@ export function isAnyOverlayOpen(flags: OverlayFlags): boolean {
     (flags.ocrResultPanelOpen ?? false) ||
     (flags.forceConfirmOpen ?? false) ||
     (flags.clearConfirmOpen ?? false) ||
-    (flags.draftBannerOpen ?? false)
+    (flags.draftBannerOpen ?? false) ||
+    (flags.helpOpen ?? false)
   )
 }
 
