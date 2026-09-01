@@ -18,17 +18,20 @@ import type { CSSProperties } from 'react'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RawScan } from '../parse/types'
 import type { NormalizedRect } from '../scan/barcode/types'
+import { CAPTURE_QUALITY_OPTIONS, type CaptureQuality } from '../camera/quality'
 import { useCamera } from '../camera/useCamera'
 import { resolveZoomValue } from '../camera/zoom'
 import { useBarcodeScanner } from '../scan/useBarcodeScanner'
 import { isAnyOverlayOpen, isBarcodeScanEnabled, type ScanMode } from '../scan/scanGating'
 import {
+  loadCaptureQuality,
   loadHelpSeen,
   loadRestrictToRoi,
   loadScanMode,
   loadSoundEnabled,
   loadZoom,
   markHelpSeen,
+  saveCaptureQuality,
   saveRestrictToRoi,
   saveScanMode,
   saveSoundEnabled,
@@ -147,7 +150,11 @@ function CapturedImageCanvas({ image, className }: { image: ImageData; className
 }
 
 export function SimpleScanScreen() {
-  const camera = useCamera()
+  // 画質プリセットは起動直後の最初の getUserMedia 要求から効かせたいため、
+  // useState の遅延初期化で1度だけ localStorage を読み、useCamera に渡す
+  // （loadScanMode 等、他の設定の読み方と同じ流儀）。
+  const [initialCaptureQuality] = useState(loadCaptureQuality)
+  const camera = useCamera(initialCaptureQuality)
 
   // 読み取りモード（バーコード / 文字）。前回選んでいたモードを次回起動時も復元する。
   const [mode, setMode] = useState<ScanMode>(loadScanMode)
@@ -286,6 +293,14 @@ export function SimpleScanScreen() {
     },
     [camera],
   )
+
+  // 画質プリセットの変更。camera.setQuality がストリームの張り直し（必要な場合のみ）
+  // まで面倒を見てくれるので、ここでは保存と呼び出しだけでよい。張り直し後の
+  // ズーム再適用も、camera.stream の変化を見ている既存の effect が自動で行う。
+  const handleChangeQuality = useCallback((value: CaptureQuality) => {
+    saveCaptureQuality(value)
+    void camera.setQuality(value)
+  }, [camera])
 
   const handleOpenHelp = useCallback(() => setHelpOpen(true), [])
   const handleCloseHelp = useCallback(() => setHelpOpen(false), [])
@@ -777,6 +792,31 @@ export function SimpleScanScreen() {
               label="バーコードを自動で除外"
               hint="枠内で検出したバーコードを塗りつぶしてから読み取ります。OFFにして「同じ画像で再認識」を押すと塗りつぶさずに読み直せます。"
             />
+          </div>
+        )}
+
+        {/* 画質プリセット: バーコード読み取りの負荷とカメラ解像度のトレードオフ設定。
+            「枠内のみ」のクロップ最適化で足りないときの保険なので、控えめな見た目にする。
+            既定は「最大」（今回の精度改善を退行させないため）。 */}
+        {mode === 'barcode' && (
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="shrink-0 font-semibold text-slate-400">画質</span>
+            <div role="radiogroup" aria-label="画質" className="flex flex-1 gap-1 rounded-lg bg-slate-800 p-0.5">
+              {CAPTURE_QUALITY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={camera.quality === opt.value}
+                  onClick={() => handleChangeQuality(opt.value)}
+                  className={`min-h-8 flex-1 rounded-md text-[11px] font-bold transition-colors ${
+                    camera.quality === opt.value ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 active:bg-slate-700'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 

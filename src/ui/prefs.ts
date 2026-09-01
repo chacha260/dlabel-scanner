@@ -1,6 +1,7 @@
 // 画面まわりのユーザー設定。読み取った内容は保存しない方針だが、
 // 毎回操作し直すのが煩わしい表示・操作の設定だけは localStorage に残す。
 
+import type { CaptureQuality } from '../camera/quality'
 import type { ScanMode } from '../scan/scanGating'
 
 const SCAN_MODE_STORAGE_KEY = 'dlabel.scanMode'
@@ -115,6 +116,32 @@ export function loadZoom(): number | null {
 export function saveZoom(value: number): void {
   try {
     localStorage.setItem(ZOOM_STORAGE_KEY, String(value))
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
+
+const CAPTURE_QUALITY_STORAGE_KEY = 'dlabel.captureQuality'
+
+/**
+ * カメラ取得解像度（画質）のプリセット。保存値が無い・壊れている場合は
+ * 既定の 'max'（端末の最大解像度）とする。'max' が既定なのは、720px一律
+ * ダウンスケールを撤廃して得た読み取り精度を、この設定のせいで
+ * 知らないうちに退行させないため（camera/quality.ts を参照）。
+ */
+export function loadCaptureQuality(): CaptureQuality {
+  try {
+    const raw = localStorage.getItem(CAPTURE_QUALITY_STORAGE_KEY)
+    return raw === 'fhd' || raw === 'hd' ? raw : 'max'
+  } catch {
+    // プライベートブラウジング等で読めなくても既定値（最大解像度）で動作させる
+    return 'max'
+  }
+}
+
+export function saveCaptureQuality(value: CaptureQuality): void {
+  try {
+    localStorage.setItem(CAPTURE_QUALITY_STORAGE_KEY, value)
   } catch {
     // 保存できなくても致命的ではないため無視する
   }

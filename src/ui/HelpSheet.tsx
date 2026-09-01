@@ -124,6 +124,11 @@ export default function HelpSheet({ onClose }: HelpSheetProps) {
             <ButtonRef>枠内のみ</ButtonRef>
             がONのとき）。
           </p>
+          <p>
+            <ButtonRef>枠内のみ</ButtonRef>
+            がONのときは、実は枠を小さく絞ること自体が読み取りを軽くします。解析するのは枠の中の映像だけになるため、
+            狙った1本ぶんまで枠を小さくするほど、端末の負荷は下がります（読み取りの正確さはそのままです）。
+          </p>
           <ul className="list-disc space-y-1.5 pl-5">
             <li>
               <ButtonRef tone="primary">枠内のみ</ButtonRef>
@@ -142,6 +147,17 @@ export default function HelpSheet({ onClose }: HelpSheetProps) {
               を押すと、バーコードの読み取りだけを止めます。カメラ映像はそのまま映り続けるので、もう一度押して
               <ButtonRef icon={<PlayIcon className="h-4 w-4" />}>再開</ButtonRef>
               すればすぐに読み取りを再開します。
+            </li>
+            <li>
+              <strong className="text-slate-100">画質</strong>
+              （既定は「最大」）: カメラが取得する映像の解像度を「最大 / 標準 / 軽量」の3段階で切り替えられます。数値が大きいほど細かいところまで写るため、バーコードの細いバーも読み取りやすくなります。
+              端末の負荷が気になるときも、まずは
+              <ButtonRef tone="primary">枠内のみ</ButtonRef>
+              で枠を狙った1本ぶんまで小さくすることを先に試してください。それでも重いと感じる場合の追加の手段として画質を下げてください。
+              <strong className="text-amber-300">
+                「軽量」（720p相当）は読み取りが軽くなる代わりに、バーの細いバーコードを読み落としやすくなります。
+              </strong>
+              設定は端末に記憶されます。
             </li>
           </ul>
         </Section>

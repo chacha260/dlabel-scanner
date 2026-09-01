@@ -2,6 +2,7 @@
 // Android Chrome 単体をターゲットとし、非対応 API は必ず try/catch で無害化する。
 
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
+import { CAPTURE_QUALITY_CONSTRAINTS, type CaptureQuality, DEFAULT_CAPTURE_QUALITY } from './quality'
 import type { ZoomRange } from './zoom'
 
 // torch / focusMode / zoom は標準の DOM 型定義（lib.dom.d.ts）に含まれていないため、
@@ -44,6 +45,16 @@ export type UseCameraResult = {
   /** ズームの範囲（zoomSupported が false のときは null） */
   zoomRange: ZoomRange | null
   setZoom: (value: number) => Promise<void>
+  /** 現在の画質プリセット（getUserMedia に要求する解像度） */
+  quality: CaptureQuality
+  /**
+   * 画質プリセットを切り替える。既にストリームが起動中の場合は、新しい制約で
+   * ストリームを張り直す（stop → start）。張り直しにより camera.stream の参照が
+   * 変わるため、呼び出し側（SimpleScanScreen）がズームの再適用に使っている
+   * 「camera.stream 変化を見て保存済みズームを当て直す」既存の仕組みがそのまま働く
+   * ＝ ここでズーム再適用を重複して行う必要はない。
+   */
+  setQuality: (value: CaptureQuality) => Promise<void>
 }
 
 function toErrorMessage(err: unknown): string {
@@ -53,7 +64,13 @@ function toErrorMessage(err: unknown): string {
   return 'カメラを起動できませんでした'
 }
 
-export function useCamera(): UseCameraResult {
+/**
+ * @param initialQuality 起動時（最初の start() 呼び出し時）に使う画質プリセット。
+ *   呼び出し側で永続化された設定（prefs.ts）を読んで渡すことを想定している
+ *   （このフック自身は永続化を一切行わない。他のプリファレンスと同様、
+ *   保存・復元は呼び出し側の責務のままにする）。省略時は既定の 'max'。
+ */
+export function useCamera(initialQuality: CaptureQuality = DEFAULT_CAPTURE_QUALITY): UseCameraResult {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const wakeLockRef = useRef<WakeLockSentinel | null>(null)
@@ -67,6 +84,12 @@ export function useCamera(): UseCameraResult {
   const [zoomSupported, setZoomSupported] = useState(false)
   const [zoom, setZoomState] = useState<number | null>(null)
   const [zoomRange, setZoomRange] = useState<ZoomRange | null>(null)
+  const [quality, setQualityState] = useState<CaptureQuality>(initialQuality)
+  // start() は useCallback の外から見える最新値を参照する必要があるため、
+  // state とは別に ref でも同じ値を保持する（quality を start の依存配列に
+  // 入れると、画質を変えるたびにフレームループ側の再生成が連鎖しかねないため、
+  // 他の設定値（roi・restrictToRoi 等）と同様に ref 経由で読む）。
+  const qualityRef = useRef<CaptureQuality>(initialQuality)
 
   // start() 中に登録した loadedmetadata ハンドラを、次回開始時・停止時に
   // 確実に取り外すために覚えておく（video 要素自体は使い回されるため）。
@@ -122,14 +145,18 @@ export function useCamera(): UseCameraResult {
   const start = useCallback(async () => {
     setError(null)
     try {
+      // ideal は「できれば」の指定であり、端末が対応していなくても失敗しない。
+      // 対応端末ではここを引き上げるだけで、小さい・バーの細いバーコードの
+      // 読み取りやすさが大きく変わる（詳細は useBarcodeScanner.ts を参照）。
+      // 画質プリセット（既定は 'max' = 端末の最大）は qualityRef 経由で読む
+      // （setQuality 参照。ここを直接 quality state にすると start 自体が
+      // 画質変更のたびに作り直され、呼び出し側の useEffect の依存が複雑になる）。
+      const { width, height } = CAPTURE_QUALITY_CONSTRAINTS[qualityRef.current]
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: 'environment' },
-          // ideal は「できれば」の指定であり、端末が対応していなくても失敗しない。
-          // 対応端末ではここを引き上げるだけで、小さい・バーの細いバーコードの
-          // 読み取りやすさが大きく変わる（詳細は useBarcodeScanner.ts を参照）。
-          width: { ideal: 3840 },
-          height: { ideal: 2160 },
+          width: { ideal: width },
+          height: { ideal: height },
         },
         audio: false,
       })
@@ -251,6 +278,26 @@ export function useCamera(): UseCameraResult {
     }
   }, [])
 
+  // 画質プリセットの切り替え。まだストリームが無い（起動前）場合は qualityRef を
+  // 更新するだけでよく、次の start() 呼び出し時にそのまま反映される。
+  // 既にストリームがある場合は、新しい制約で取り直すため一度 stop() してから
+  // start() する（同時に2つのカメラハンドルを持たないようにするため）。
+  // stop()/start() を経ると camera.stream の参照が変わるので、呼び出し側
+  // （SimpleScanScreen）が持つ「camera.stream 変化を見て保存済みズームを当て直す」
+  // 既存の仕組みがそのまま働き、ズームの再適用もここで別途行う必要はない。
+  const setQuality = useCallback(
+    async (value: CaptureQuality) => {
+      if (qualityRef.current === value) return
+      qualityRef.current = value
+      setQualityState(value)
+      if (streamRef.current) {
+        stop()
+        await start()
+      }
+    },
+    [stop, start],
+  )
+
   // タブが再度前面に来たときに Wake Lock を再取得する
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -286,5 +333,7 @@ export function useCamera(): UseCameraResult {
     zoom,
     zoomRange,
     setZoom,
+    quality,
+    setQuality,
   }
 }

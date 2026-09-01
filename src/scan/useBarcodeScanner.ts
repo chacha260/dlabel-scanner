@@ -13,11 +13,27 @@
 //   - zxing-wasm フォールバック経路（BarcodeDetector 非対応環境のみ）:
 //     ImageData 化のため canvas を経由する必要があるが、上限を 1280px に
 //     緩め、かつ元映像がそれを超える場合だけ縮小する（computeDownscaledSize）。
+//
+// 「枠内のみ」ON時のクロップ最適化について（重要、barcode/crop.ts も参照）:
+// 6MP級（例: 1836×3264）のカメラでは、フル解像度のまま毎フレーム解析すると
+// 端末によっては明確に重い。だが解像度そのものを下げると上のダウンスケール
+// 撤廃の効果（細いバーが読めること）を打ち消してしまう。
+// 「枠内のみ」がONのとき、バーコードは定義上その枠の中にしかないため、
+// 解析対象を「枠が占める範囲だけを切り出した OffscreenCanvas」に絞る
+// （drawImage の１回で切り出しと等倍コピーを同時に行う）。これなら
+// 画素数は「枠が画面に占める割合」の分だけ減るのに、切り出した範囲は
+// 縮小しない（ネイティブ解像度のまま）ので精度は落ちない。
+// 唯一、枠を画面のほぼ全体まで広げた場合だけ CROP_PIXEL_BUDGET_PX を
+// 超えないよう縮小する（computeCropSize）。切り出し後の検出結果の box は
+// 「切り出したcanvas自身」基準のクロップ座標になるため、映像座標のROIフィルタ
+// （filterHitsByRoi）を重ねて適用してはいけない（座標系混同で正しいヒットを
+// 静かに弾いてしまう）。詳細な理由は crop.ts の resolveBarcodeCropPlan を参照。
 
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 import type { RawScan } from '../parse/types'
 import { createBarcodeReader, filterHitsByRoi, selectNewHits } from './barcode'
 import type { BarcodeBackend, BarcodeHit, BarcodeReader, NormalizedRect } from './barcode'
+import { computeCropSize, CROP_PIXEL_BUDGET_PX, resolveBarcodeCropPlan } from './barcode/crop'
 import { computeDownscaledSize } from './barcode/scale'
 // ROI の表示座標→映像座標への変換は geometry.ts の1箇所だけに閉じ込める
 // （ocr/index.ts は tesseract 一式を含む重いモジュールのため、型と変換関数だけを
@@ -194,6 +210,11 @@ export function useBarcodeScanner({
   const backendRef = useRef<BarcodeBackend | null>(null)
   const canvasRef = useRef<OffscreenCanvas | null>(null)
   const ctxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null)
+  // 「枠内のみ」ON時（クロップ経路）専用の使い回しcanvas。zxing経路が使う
+  // canvasRef/ctxRef（フル フレーム用）とは別に持つ。restrictToRoiの
+  // ON/OFF切り替えのたびに毎回作り直さずに済むようにするため。
+  const cropCanvasRef = useRef<OffscreenCanvas | null>(null)
+  const cropCtxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null)
   const busyRef = useRef(false)
   const lastFrameAtRef = useRef(0)
   // 「読み取り済み」通知（onDuplicate）を同じ値について連打しないための、
@@ -263,24 +284,25 @@ export function useBarcodeScanner({
     }
 
     // 1フレーム分の検出結果（複数件ありうる）を処理する。
-    // ネイティブ・zxing どちらの経路からも同じ後処理をするための共通処理。
+    // ネイティブ・zxing どちらの経路からも、クロップ経路・フル フレーム経路の
+    // どちらからも同じ後処理をするための共通処理。
+    //
+    // roiFilterTarget: 映像座標のROIでヒットをさらに絞り込みたいときだけその矩形を渡す。
+    // null なら絞り込みをしない。「枠内のみ」がONでも、検出そのものを枠へ切り出して
+    // 行った場合（クロップ経路）は必ず null になる（resolveBarcodeCropPlan 参照）。
+    // 理由: クロップ後の hit.box は「切り出したcanvas自身」基準のクロップ座標であり、
+    // 映像座標のROIとは分母が異なる。ここで比較すると座標系の食い違いにより、
+    // 正しいヒットまで静かに弾いてしまう（クロップ結果は定義上すでに枠の内側なので、
+    // そもそも絞り込みも不要）。
     //
     // 以前は hits[0] だけを見ており、それがデデュープ対象なら残り全部を
     // 無条件に捨てていた（縦に並んだ複数バーコードのうち真ん中が読めない
     // 不具合の原因）。今は selectNewHits でヒットごとに独立して判定し、
     // 追加すべきと判定された分だけまとめて処理する。
-    function handleHits(hits: BarcodeHit[], video: HTMLVideoElement): void {
+    function handleHits(hits: BarcodeHit[], roiFilterTarget: NormalizedRect | null): void {
       if (stoppedRef.current || hits.length === 0) return
 
-      // 「枠内のみ」有効時は、box の中心が ROI（映像座標）の内側にあるヒットだけに絞る。
-      // ROI は表示座標で保持しているため、比較の直前に必ずここで映像座標へ変換する
-      // （変換をこの1箇所に閉じ込め、他ではやらない）。box を持たないヒットは
-      // filterHitsByRoi 内で常に採用される。
-      const currentRoi = roiRef.current
-      const candidates =
-        restrictToRoiRef.current && currentRoi
-          ? filterHitsByRoi(hits, mapCoverRectToVideo(currentRoi, video.clientWidth, video.clientHeight, video.videoWidth, video.videoHeight))
-          : hits
+      const candidates = roiFilterTarget ? filterHitsByRoi(hits, roiFilterTarget) : hits
       if (candidates.length === 0) return
 
       // 追加の可否は「今その値が呼び出し側の結果一覧に既にあるか」だけで決める
@@ -336,14 +358,58 @@ export function useBarcodeScanner({
       lastFrameAtRef.current = now
       busyRef.current = true
 
-      if (backendRef.current === 'native') {
-        // ネイティブ経路: <video> をそのまま渡す。canvas 描画・ダウンスケール・
-        // ImageBitmap 生成のいずれも行わない（このフレームでは per-frame の
-        // createImageBitmap は一切発生しない）。boundingBox の正規化は
-        // native.ts 側が videoWidth/videoHeight（= 映像の実解像度）で行う。
+      // 「枠内のみ」の枠は表示座標で保持しているため、使う直前に必ずここで
+      // mapCoverRectToVideo を通して映像座標へ変換する（フレームループ全体で
+      // 変換はこの1箇所だけに閉じ込め、他のどこでも変換しない）。
+      const currentRoi = roiRef.current
+      const videoRoi =
+        restrictToRoiRef.current && currentRoi
+          ? mapCoverRectToVideo(currentRoi, video.clientWidth, video.clientHeight, video.videoWidth, video.videoHeight)
+          : undefined
+      const cropPlan = resolveBarcodeCropPlan(restrictToRoiRef.current, videoRoi)
+
+      // cropPlan.applyRoiFilter は常に false になる設計だが（crop.ts 参照）、
+      // 呼び出し側はここで決めた値をそのまま使い、tick() の外で再判定しない。
+      const finishFrame = (hits: BarcodeHit[]) => {
+        handleHits(hits, cropPlan.applyRoiFilter ? (videoRoi ?? null) : null)
+      }
+
+      if (cropPlan.crop) {
+        // 「枠内のみ」ON: video 全体ではなく、枠の範囲だけを OffscreenCanvas に
+        // 切り出し、そこに対して検出する（ネイティブ・zxing どちらのバックエンドでも
+        // 同じ切り出しを使う）。既定では等倍のまま（縮小しない）で、枠を広げすぎた
+        // ときだけ CROP_PIXEL_BUDGET_PX に収まるよう computeCropSize が縮小する。
+        const crop = cropPlan.crop
+        const sx = Math.round(crop.x * video.videoWidth)
+        const sy = Math.round(crop.y * video.videoHeight)
+        const sw = Math.max(1, Math.round(crop.w * video.videoWidth))
+        const sh = Math.max(1, Math.round(crop.h * video.videoHeight))
+        const { width: dw, height: dh } = computeCropSize(sw, sh, CROP_PIXEL_BUDGET_PX)
+
+        if (!cropCanvasRef.current) {
+          cropCanvasRef.current = new OffscreenCanvas(dw, dh)
+          cropCtxRef.current = cropCanvasRef.current.getContext('2d', {
+            willReadFrequently: true,
+          }) as OffscreenCanvasRenderingContext2D | null
+        }
+        const cropCanvas = cropCanvasRef.current
+        if (cropCanvas.width !== dw || cropCanvas.height !== dh) {
+          cropCanvas.width = dw
+          cropCanvas.height = dh
+        }
+        const cropCtx = cropCtxRef.current
+        if (!cropCtx) {
+          busyRef.current = false
+          return
+        }
+        // 切り出し（sx,sy,sw,sh は映像座標系のピクセル範囲）と等倍コピーを
+        // drawImage 1回で行う。検出結果の box はこの canvas 自身の dw×dh を
+        // 分母にした「クロップ座標」になる（=映像座標ではない。上のコメント参照）。
+        cropCtx.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh)
+
         reader
-          .detect(video)
-          .then((hits) => handleHits(hits, video))
+          .detect(cropCanvas)
+          .then(finishFrame)
           .catch(() => {
             // 1 フレームの検出失敗はループを止めずに無視する
           })
@@ -353,8 +419,25 @@ export function useBarcodeScanner({
         return
       }
 
-      // zxing-wasm フォールバック経路: ImageData 化のため canvas 経由が必須。
-      // 長辺 1280px を超える場合だけ縮小する（超えていなければ等倍のまま）。
+      if (backendRef.current === 'native') {
+        // ネイティブ経路・「枠内のみ」OFF: <video> をそのまま渡す。canvas 描画・
+        // ダウンスケール・ImageBitmap 生成のいずれも行わない（このフレームでは
+        // per-frame の createImageBitmap は一切発生しない）。boundingBox の正規化は
+        // native.ts 側が videoWidth/videoHeight（= 映像の実解像度）で行う。
+        reader
+          .detect(video)
+          .then(finishFrame)
+          .catch(() => {
+            // 1 フレームの検出失敗はループを止めずに無視する
+          })
+          .finally(() => {
+            busyRef.current = false
+          })
+        return
+      }
+
+      // zxing-wasm フォールバック経路・「枠内のみ」OFF: ImageData 化のため canvas
+      // 経由が必須。長辺 1280px を超える場合だけ縮小する（超えていなければ等倍のまま）。
       const { width, height } = computeDownscaledSize(video.videoWidth, video.videoHeight, ZXING_LONG_EDGE_PX)
 
       if (!canvasRef.current) {
@@ -379,7 +462,7 @@ export function useBarcodeScanner({
       // （ワーカーへ転送する必要があるのは zxing 経路だけのため）。
       reader
         .detect(canvas)
-        .then((hits) => handleHits(hits, video))
+        .then(finishFrame)
         .catch(() => {
           // 1 フレームの検出失敗はループを止めずに無視する
         })
