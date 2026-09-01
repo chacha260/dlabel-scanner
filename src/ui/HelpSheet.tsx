@@ -6,6 +6,10 @@
 //
 // エントリーチャンクを太らせないよう、SimpleScanScreen.tsx 側で
 // React.lazy + Suspense を使って別チャンクとして遅延読み込みする。
+//
+// 「バーコード」「文字」の2モードに分かれたのに合わせて、以前の
+// 「枠はOCRとバーコードの両方を兼ねる」という説明は完全に書き直してある
+// （2つの枠は別物で、それぞれ別に記憶される、という説明に置き換えた）。
 
 import type { ReactNode } from 'react'
 import {
@@ -80,51 +84,87 @@ export default function HelpSheet({ onClose }: HelpSheetProps) {
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         <Section title="このアプリでできること">
           <p>
-            棚のラベルにスマホのカメラを向けると、バーコードは自動で読み取ります。バーコードが無い部分の文字は、枠で囲って
-            <ButtonRef icon={<ScanIcon className="h-4 w-4" />} tone="primary">
-              枠内をOCR
-            </ButtonRef>
-            を押すと読み取れます。読み取った内容はどちらも画面下の一覧にたまっていき、あとからコピーして使えます。
+            画面いちばん上の切り替えで、<strong className="text-slate-100">「バーコード」</strong>と
+            <strong className="text-slate-100">「文字」</strong>の2つのモードを切り替えて使います。
+            どちらのモードで読み取った内容も、同じ1つの一覧（画面下）にたまっていき、あとからコピーして使えます。
+          </p>
+          <p>
+            2つのモードはそれぞれ<strong className="text-slate-100">別々の水色の枠</strong>を持っていて、
+            動かした位置・大きさはモードごとに個別に記憶されます。「バーコードモードで動かした枠が、文字モードの枠にも影響する」
+            ということはありません。
           </p>
         </Section>
 
-        <Section title="バーコードを読む">
-          <p>特別な操作はいりません。カメラをバーコードに向けるだけで、自動的に・繰り返し読み取って一覧に追加していきます。</p>
+        <Section title="バーコードモード">
           <p>
+            <ButtonRef tone="primary">バーコード</ButtonRef>
+            を選んでいる間は、カメラをバーコードに向けるだけで自動的に・繰り返し読み取って一覧に追加していきます。特別な操作はいりません。
+          </p>
+          <p>
+            水色の枠（「読み取り範囲」）は、バーコードを受け付ける範囲を示しています。
             カメラ映像は<strong className="text-slate-100">毎秒最大10回</strong>（0.1秒ごと）解析しています。
             端末の処理が追いつかないときは、そのぶん自動的に間引くため、動作が重くなることはありません。
           </p>
           <p>
-            同じバーコードは、一度読み取ってから
-            <strong className="text-slate-100">1.5秒</strong>のあいだ二重に追加されません。
-            これは<strong className="text-slate-100">同じ値のときだけ</strong>で、別のバーコードなら待たずにすぐ追加されます。
-            続けて何本も読むときに待たされることはありません。
+            <strong className="text-slate-100">同じ値のバーコードは、一覧に残っている間は二度と追加されません。</strong>
+            カメラを向け続けても一覧が同じ値で埋まっていくことはなく、その値の行を
+            <CloseIcon className="mx-0.5 inline h-3.5 w-3.5 align-text-bottom text-slate-400" />
+            で削除するか
+            <ButtonRef tone="danger">クリア</ButtonRef>
+            を押すと、その値はまた新規として追加できるようになります。既に一覧にある値を検出したときは、
+            追加はせず枠の中に控えめに<strong className="text-slate-100">「読み取り済み」</strong>と表示するだけにしています。
           </p>
           <p>
-            <ButtonRef icon={<SoundOnIcon className="h-4 w-4" />}>音</ButtonRef>
-            のボタンで読み取り音のON/OFFを切り替えられます。
-            <ButtonRef icon={<SoundOffIcon className="h-4 w-4" />}>OFF</ButtonRef>
-            にしていても、端末の振動はそのまま鳴ります。
+            別のバーコードなら待たずにすぐ追加されます。枠の中に複数本のバーコードが写っていれば、
+            <strong className="text-slate-100">1回の読み取りでまとめて全部</strong>一覧に追加されます。
           </p>
           <p>
-            <ButtonRef icon={<PauseIcon className="h-4 w-4" />} tone="amber">
-              一時停止
-            </ButtonRef>
-            を押すと、バーコードの読み取りだけを止めます。カメラ映像はそのまま映り続けるので、もう一度押して
-            <ButtonRef icon={<PlayIcon className="h-4 w-4" />}>再開</ButtonRef>
-            すればすぐに読み取りを再開します。
+            棚のラベルなどでバーコードが縦に何本も並んでいて、
+            <strong className="text-slate-100">そのうちの1本だけ</strong>を読みたいときは、水色の枠をその1本にぴったり収まる大きさまで小さくしてください。枠の外に出た他のバーコードは読み取り対象になりません（
+            <ButtonRef>枠内のみ</ButtonRef>
+            がONのとき）。
           </p>
+          <ul className="list-disc space-y-1.5 pl-5">
+            <li>
+              <ButtonRef tone="primary">枠内のみ</ButtonRef>
+              （既定でON）: 枠の中にあるバーコードだけを読み取ります。OFFにすると、カメラに写っている画面全体からバーコードを読み取ります。設定は端末に記憶されます。
+            </li>
+            <li>
+              <ButtonRef icon={<SoundOnIcon className="h-4 w-4" />}>音</ButtonRef>
+              で読み取り音のON/OFFを切り替えられます。
+              <ButtonRef icon={<SoundOffIcon className="h-4 w-4" />}>OFF</ButtonRef>
+              にしていても、端末の振動はそのまま鳴ります。
+            </li>
+            <li>
+              <ButtonRef icon={<PauseIcon className="h-4 w-4" />} tone="amber">
+                一時停止
+              </ButtonRef>
+              を押すと、バーコードの読み取りだけを止めます。カメラ映像はそのまま映り続けるので、もう一度押して
+              <ButtonRef icon={<PlayIcon className="h-4 w-4" />}>再開</ButtonRef>
+              すればすぐに読み取りを再開します。
+            </li>
+          </ul>
         </Section>
 
-        <Section title="文字を読む（OCR）">
-          <p>カメラ映像の上にある水色の枠を、読みたい文字の上に合わせます。</p>
+        <Section title="文字モード（OCR）">
+          <p>
+            <ButtonRef tone="primary">文字</ButtonRef>
+            を選んでいる間は、
+            <strong className="text-slate-100">バーコードの自動読み取りは止まります。</strong>
+            このモードで一覧に追加されるのは、シャッターを押して明示的に読んだものだけです
+            （カメラを向けているだけでは何も追加されません）。
+          </p>
+          <p>
+            水色の枠（「文字を囲む」）は、OCRで読む範囲そのものです。読みたい文字の上にこの枠を合わせてください。
+            バーコードモードの枠とは別物で、動かしてもバーコードモード側の枠には影響しません。
+          </p>
           <ul className="list-disc space-y-1.5 pl-5">
             <li>枠の内側を指でドラッグすると、枠ごと移動します。</li>
             <li>枠のふちにある小さな丸い印をドラッグすると、その辺だけ大きさを変えられます。</li>
             <li>
               触っているうちに分からなくなったら、枠の左上にある
               <ButtonRef>枠をリセット</ButtonRef>
-              で元の位置・大きさに戻せます。
+              で、今のモードの枠だけを元の位置・大きさに戻せます（もう一方のモードの枠には影響しません）。
             </li>
           </ul>
           <p>

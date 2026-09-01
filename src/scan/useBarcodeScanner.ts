@@ -16,9 +16,14 @@
 
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 import type { RawScan } from '../parse/types'
-import { createBarcodeReader } from './barcode'
+import { createBarcodeReader, filterHitsByRoi, selectNewHits } from './barcode'
 import type { BarcodeBackend, BarcodeHit, BarcodeReader, NormalizedRect } from './barcode'
 import { computeDownscaledSize } from './barcode/scale'
+// ROI の表示座標→映像座標への変換は geometry.ts の1箇所だけに閉じ込める
+// （ocr/index.ts は tesseract 一式を含む重いモジュールのため、型と変換関数だけを
+// 直接ファイルから import し、余計な依存をこのフレームループに持ち込まない）。
+import { mapCoverRectToVideo } from './ocr/geometry'
+import type { RoiRect } from './ocr/types'
 
 export type UseBarcodeScannerOptions = {
   videoRef: RefObject<HTMLVideoElement | null>
@@ -30,11 +35,43 @@ export type UseBarcodeScannerOptions = {
    * zxing の Worker を破棄・再生成する無駄を避けられる。
    */
   active?: boolean
+  /**
+   * 追加の可否そのものは isDuplicate（一覧の状態）だけで決まる。この値は
+   * 「読み取り済み」通知（onDuplicate）を同じ値について連打しないための、
+   * 通知だけに使う短い時間窓（ミリ秒）。
+   */
   dedupeMs?: number
   /** 検出時のビープ音を鳴らすか（既定: true） */
   beep?: boolean
   /** 検出時にバイブレーションさせるか（既定: true） */
   vibrate?: boolean
+  /**
+   * バーコード読み取りの対象を絞る ROI 枠（表示座標 = <video> の CSS ボックスに
+   * 対する 0..1 の割合）。restrictToRoi が true のときだけ使われる。
+   * ref 経由で読むため、値を変えてもフレームループ自体は張り直されない。
+   */
+  roi?: RoiRect
+  /**
+   * true の場合、検出結果のうち box の中心が roi の内側にあるものだけを採用する
+   * （既定: false = 従来通りフレーム全体を対象にする）。
+   * box を持たない（位置情報を提供しない）ヒットは常に採用する。
+   */
+  restrictToRoi?: boolean
+  /**
+   * この値は既に呼び出し側の結果一覧にあるか？ を答える純粋な述語（省略時は常に false
+   * ＝一覧の状態によらず全てのヒットを新規扱いする）。フレームごとに新しい関数を渡しても
+   * このフック自身は ref 経由で読むだけなので、フレームループ（バックエンド保持を含む）が
+   * 張り直されることはない。呼び出し側の結果一覧のコピーはこのフックの中には一切持たない
+   * （常に呼び出し側に「今のリストの状態」を尋ねるだけ）。
+   */
+  isDuplicate?: (value: string) => boolean
+  /**
+   * isDuplicate が true を返した（＝一覧に既にある）ヒットを検出したときの通知。
+   * 一覧には追加されない（onScan は呼ばれない）。連打防止のため、同じ値については
+   * dedupeMs 経過するまで再度は呼ばれない（フレームごとに呼び続けることはない）。
+   * 「読み取り済み」などの軽いフィードバック表示にだけ使うことを想定している。
+   */
+  onDuplicate?: (hit: BarcodeHit) => void
   onScan: (scan: RawScan) => void
 }
 
@@ -105,6 +142,10 @@ export function useBarcodeScanner({
   dedupeMs = 1500,
   beep = true,
   vibrate = true,
+  roi,
+  restrictToRoi = false,
+  isDuplicate,
+  onDuplicate,
   onScan,
 }: UseBarcodeScannerOptions): UseBarcodeScannerResult {
   const [backend, setBackend] = useState<BarcodeBackend | null>(null)
@@ -116,6 +157,17 @@ export function useBarcodeScanner({
     onScanRef.current = onScan
   }, [onScan])
 
+  // isDuplicate・onDuplicate も ref 経由で読む。呼び出し側（SimpleScanScreen）は
+  // 「現在の結果一覧」を毎回クロージャに閉じ込めた新しい関数を渡してくることが
+  // あり得るため、依存配列に入れるとその都度フレームループが張り直しになってしまう。
+  // ここでは常に最新の関数を ref で保持し、フレームループ自体は張り直さない。
+  const isDuplicateRef = useRef(isDuplicate)
+  const onDuplicateRef = useRef(onDuplicate)
+  useEffect(() => {
+    isDuplicateRef.current = isDuplicate
+    onDuplicateRef.current = onDuplicate
+  }, [isDuplicate, onDuplicate])
+
   // ビープ / バイブの ON-OFF は ref 経由で読む。
   // 依存配列に入れるとトグルのたびにフレームループが張り直しになるため。
   const beepRef = useRef(beep)
@@ -124,6 +176,16 @@ export function useBarcodeScanner({
     beepRef.current = beep
     vibrateRef.current = vibrate
   }, [beep, vibrate])
+
+  // ROI 絞り込みの ON/OFF・枠の位置も ref 経由で読む。
+  // 依存配列に入れるとドラッグ中や枠内のみトグルのたびにフレームループ
+  // （＝バックエンド保持を含む）が張り直しになるため。
+  const roiRef = useRef(roi)
+  const restrictToRoiRef = useRef(restrictToRoi)
+  useEffect(() => {
+    roiRef.current = roi
+    restrictToRoiRef.current = restrictToRoi
+  }, [roi, restrictToRoi])
 
   const readerRef = useRef<BarcodeReader | null>(null)
   // フレームループの tick() が「ネイティブ経路（video を直接渡す）」と
@@ -134,7 +196,9 @@ export function useBarcodeScanner({
   const ctxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null)
   const busyRef = useRef(false)
   const lastFrameAtRef = useRef(0)
-  const lastSeenRef = useRef<Map<string, number>>(new Map())
+  // 「読み取り済み」通知（onDuplicate）を同じ値について連打しないための、
+  // 通知だけに使う直近通知時刻。追加の可否（isDuplicate）には一切関与しない。
+  const lastDuplicateNotifyRef = useRef<Map<string, number>>(new Map())
   const audioCtxRef = useRef<AudioContext | null>(null)
   const rvfcHandleRef = useRef<number | null>(null)
   const rafHandleRef = useRef<number | null>(null)
@@ -198,25 +262,65 @@ export function useBarcodeScanner({
       }
     }
 
-    // 検出結果1件を「新しいヒットか」判定し、必要ならビープ/バイブ/onScan まで行う。
+    // 1フレーム分の検出結果（複数件ありうる）を処理する。
     // ネイティブ・zxing どちらの経路からも同じ後処理をするための共通処理。
-    function handleHits(hits: BarcodeHit[]): void {
+    //
+    // 以前は hits[0] だけを見ており、それがデデュープ対象なら残り全部を
+    // 無条件に捨てていた（縦に並んだ複数バーコードのうち真ん中が読めない
+    // 不具合の原因）。今は selectNewHits でヒットごとに独立して判定し、
+    // 追加すべきと判定された分だけまとめて処理する。
+    function handleHits(hits: BarcodeHit[], video: HTMLVideoElement): void {
       if (stoppedRef.current || hits.length === 0) return
-      const hit = hits[0]
-      const seenAt = lastSeenRef.current.get(hit.value)
-      const nowMs = Date.now()
-      if (seenAt !== undefined && nowMs - seenAt < dedupeMs) return
 
-      lastSeenRef.current.set(hit.value, nowMs)
-      setLastHit(hit)
+      // 「枠内のみ」有効時は、box の中心が ROI（映像座標）の内側にあるヒットだけに絞る。
+      // ROI は表示座標で保持しているため、比較の直前に必ずここで映像座標へ変換する
+      // （変換をこの1箇所に閉じ込め、他ではやらない）。box を持たないヒットは
+      // filterHitsByRoi 内で常に採用される。
+      const currentRoi = roiRef.current
+      const candidates =
+        restrictToRoiRef.current && currentRoi
+          ? filterHitsByRoi(hits, mapCoverRectToVideo(currentRoi, video.clientWidth, video.clientHeight, video.videoWidth, video.videoHeight))
+          : hits
+      if (candidates.length === 0) return
+
+      // 追加の可否は「今その値が呼び出し側の結果一覧に既にあるか」だけで決める
+      // （isDuplicate 未指定時は常に false ＝一覧の状態によらず全て新規扱い）。
+      // 時間はここでは一切関係ない。
+      const isDuplicate = isDuplicateRef.current ?? (() => false)
+      const newHits = selectNewHits(candidates, isDuplicate)
+      const nowMs = Date.now()
+
+      // 追加はされなかったが、その理由が「一覧に既にある」ことであるヒットにだけ、
+      // 「読み取り済み」の合図を出す。連打防止のため、同じ値については
+      // 直近 dedupeMs 以内に通知済みなら再通知しない（フレームごとに毎回
+      // 光らせるとうるさいだけで、追加の可否にはそもそも関与しない）。
+      // ビープ/バイブと同様、フレームにつき通知は最大1回に留める。
+      const addedValues = new Set(newHits.map((h) => h.value))
+      for (const hit of candidates) {
+        if (addedValues.has(hit.value) || !isDuplicate(hit.value)) continue
+        const lastNotified = lastDuplicateNotifyRef.current.get(hit.value)
+        if (lastNotified !== undefined && nowMs - lastNotified < dedupeMs) continue
+        lastDuplicateNotifyRef.current.set(hit.value, nowMs)
+        onDuplicateRef.current?.(hit)
+        break
+      }
+
+      if (newHits.length === 0) return
+      setLastHit(newHits[newHits.length - 1])
+
+      // ビープ/バイブは「このフレームで新規ヒットが1件以上あったか」でのみ判定する。
+      // ヒット件数ぶん鳴らすとバーストになるため、フレームにつき最大1回に留める。
       if (vibrateRef.current) playVibration()
       if (beepRef.current) playBeep(audioCtxRef)
-      onScanRef.current({
-        value: hit.value,
-        source: 'barcode',
-        format: hit.format,
-        at: nowMs,
-      })
+
+      for (const hit of newHits) {
+        onScanRef.current({
+          value: hit.value,
+          source: 'barcode',
+          format: hit.format,
+          at: nowMs,
+        })
+      }
     }
 
     function tick(): void {
@@ -239,7 +343,7 @@ export function useBarcodeScanner({
         // native.ts 側が videoWidth/videoHeight（= 映像の実解像度）で行う。
         reader
           .detect(video)
-          .then(handleHits)
+          .then((hits) => handleHits(hits, video))
           .catch(() => {
             // 1 フレームの検出失敗はループを止めずに無視する
           })
@@ -275,7 +379,7 @@ export function useBarcodeScanner({
       // （ワーカーへ転送する必要があるのは zxing 経路だけのため）。
       reader
         .detect(canvas)
-        .then(handleHits)
+        .then((hits) => handleHits(hits, video))
         .catch(() => {
           // 1 フレームの検出失敗はループを止めずに無視する
         })

@@ -18,13 +18,16 @@ export { boxesToMask, DEFAULT_MASK_MARGIN, expandRect, normalizedRectToPixels, r
 export type { PixelRect } from './mask'
 export {
   clampRoi,
+  DEFAULT_BARCODE_ROI,
   DEFAULT_ROI,
   isValidRoiRect,
+  loadPersistedBarcodeRoi,
   loadPersistedRoi,
   MIN_ROI_H,
   MIN_ROI_W,
   moveRoi,
   resizeRoi,
+  savePersistedBarcodeRoi,
   savePersistedRoi,
 } from './roi'
 export type { HandleId } from './roi'

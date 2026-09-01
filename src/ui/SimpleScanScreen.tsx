@@ -1,35 +1,54 @@
-// アプリの唯一の画面。カメラでバーコードを継続的に読み取りつつ、枠内をシャッターで
-// OCR にかけ、両方の結果を1つのリストに時系列（新しい順）でため込むだけの
+// アプリの唯一の画面。上部の切り替えで「バーコード」「文字」の2モードを持ち、
+// バーコードモードではカメラでバーコードを継続的に読み取り、文字（OCR）モードでは
+// 継続的な読み取りを止めて、枠内をシャッターで撮ったときだけ文字を読み取る。
+// 結果はどちらのモードでも同じ1つのリストに時系列（新しい順）でため込むだけの
 // 最小構成。フィールド振り分け・保存・履歴は一切行わない
 // （結果はメモリ上のみに保持し、画面を閉じると消える。これは意図的な仕様）。
+//
+// 2モードに分けた理由（現場フィードバック）: 以前は水色の枠が1つしかなく、
+// 「OCRが読む範囲」と「バーコードを受け付ける範囲」という2つの意味を同時に
+// 持っていたため分かりにくいと指摘された。今はモードごとに専用の枠を持たせ、
+// 今どちらのモードかを常にはっきり分かるようにしている。
 //
 // 現場の要件がまだ固まっていないため、まずはこの最小読み取りツールを持って行き、
 // 実際に何が必要かを確認するためのもの。ラベル定義エディタ・履歴・CSV書き出し・
 // 設定画面などの既存機能は src/ui/legacy 以下に退避してあり、削除はしていない。
 
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
+import type { CSSProperties } from 'react'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RawScan } from '../parse/types'
 import type { NormalizedRect } from '../scan/barcode/types'
 import { useCamera } from '../camera/useCamera'
 import { resolveZoomValue } from '../camera/zoom'
 import { useBarcodeScanner } from '../scan/useBarcodeScanner'
-import { isAnyOverlayOpen, isBarcodeScanEnabled } from '../scan/scanGating'
-import { loadHelpSeen, loadSoundEnabled, loadZoom, markHelpSeen, saveSoundEnabled, saveZoom } from './prefs'
+import { isAnyOverlayOpen, isBarcodeScanEnabled, type ScanMode } from '../scan/scanGating'
+import {
+  loadHelpSeen,
+  loadRestrictToRoi,
+  loadScanMode,
+  loadSoundEnabled,
+  loadZoom,
+  markHelpSeen,
+  saveRestrictToRoi,
+  saveScanMode,
+  saveSoundEnabled,
+  saveZoom,
+} from './prefs'
 import {
   applyOcrFilter,
   boxesToMask,
   captureFrameAndRoi,
   cropVideoSpaceRoi,
+  DEFAULT_BARCODE_ROI,
   DEFAULT_OCR_OPTIONS,
   DEFAULT_ROI,
   hasOcrEngineCached,
+  loadPersistedBarcodeRoi,
   loadPersistedRoi,
-  moveRoi,
   OCR_FILTER_LABELS,
   preloadOcr,
   recognizeCaptured,
-  resizeRoi,
+  savePersistedBarcodeRoi,
   savePersistedRoi,
   trimBarcodeBoxesToStripes,
   type HandleId,
@@ -38,6 +57,7 @@ import {
   type OcrProgress,
   type RoiRect,
 } from '../scan/ocr'
+import { useDraggableRoi } from './useDraggableRoi'
 import { Button } from './components/Button'
 import { Select, Switch } from './components/Controls'
 import { CloseIcon, CopyIcon, FlashIcon, FlashOffIcon, PauseIcon, PlayIcon, ScanIcon, SoundOffIcon, SoundOnIcon, SpinnerIcon, WarningIcon } from './components/Icons'
@@ -48,14 +68,18 @@ import { copyToClipboard, sourceBadgeClass, sourceBadgeLabel } from './lib'
 // （初回表示までに読み込めていればよく、常に即必要というわけではないため）。
 const HelpSheet = lazy(() => import('./HelpSheet'))
 
-// バーコード検出時のビープ/バイブ/連続無視時間。設定画面がないため既定値を固定で使う。
-// 同じ値のバーコードを二重に追加しない時間。
-// 変更した場合は HelpSheet.tsx の「バーコードを読む」の記載も合わせること
-const DEDUPE_MS = 1500
+// 「読み取り済み」通知の連打防止だけに使う短い時間窓（ミリ秒）。追加の可否
+// （＝一覧に同じ値が既にあるか）には一切関与しない。バーコード検出時の
+// ビープ/バイブもこの値を流用する。変更した場合は HelpSheet.tsx の
+// 「バーコードを読む」の記載も合わせること。
+const NOTIFY_WINDOW_MS = 1500
+
+// 「読み取り済み」表示を出しっぱなしにする時間（ミリ秒）
+const DUPLICATE_HINT_VISIBLE_MS = 1200
 
 // ROI 枠のリサイズハンドル定義（表示上の位置と、掴んだときのカーソル形状）。
 // 実際の当たり判定は h-11 w-11（44px 角）で、見た目の小さな丸印より大きく取る
-// （指でも掴みやすいように）。
+// （指でも掴みやすいように）。バーコード枠・OCR枠のどちらでも共通で使う。
 const RESIZE_HANDLES: { id: HandleId; left: string; top: string; cursor: string }[] = [
   { id: 'nw', left: '0%', top: '0%', cursor: 'nwse-resize' },
   { id: 'n', left: '50%', top: '0%', cursor: 'ns-resize' },
@@ -125,8 +149,28 @@ function CapturedImageCanvas({ image, className }: { image: ImageData; className
 export function SimpleScanScreen() {
   const camera = useCamera()
 
+  // 読み取りモード（バーコード / 文字）。前回選んでいたモードを次回起動時も復元する。
+  const [mode, setMode] = useState<ScanMode>(loadScanMode)
+  const handleChangeMode = useCallback((next: ScanMode) => {
+    setMode(next)
+    saveScanMode(next)
+  }, [])
+
   const [results, setResults] = useState<ResultItem[]>([])
   const nextIdRef = useRef(0)
+  // useBarcodeScanner に「今この値は一覧にあるか」を答えるための ref。
+  // フック側は結果一覧のコピーを一切持たず、常にこの ref 経由で最新の一覧を尋ねるだけ
+  // （state を直接渡すと、結果一覧が変わるたびにフレームループの依存が変わってしまう）。
+  const resultsRef = useRef(results)
+  useEffect(() => {
+    resultsRef.current = results
+  }, [results])
+  // 対象はバーコード行のみ。OCR で読んだ文字列がたまたま同じ値でも、
+  // バーコードの読み取りを止める理由にはならないため。
+  const isDuplicateValue = useCallback(
+    (value: string) => resultsRef.current.some((item) => item.source === 'barcode' && item.raw === value),
+    [],
+  )
 
   const [manualPaused, setManualPaused] = useState(false)
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState === 'visible')
@@ -149,23 +193,36 @@ export function SimpleScanScreen() {
   const [psm, setPsm] = useState<OcrOptions['psm']>(DEFAULT_OCR_OPTIONS.psm)
   const [filterMode, setFilterMode] = useState<OcrFilterMode>('raw')
 
-  // OCR枠（表示座標、0..1）。移動・リサイズ可能で、矩形だけ localStorage に永続化する
-  // （これは UI 上の好み設定であり、スキャン結果自体はこれまで通りメモリ上のみ）。
-  const [roi, setRoi] = useState<RoiRect>(() => loadPersistedRoi())
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(loadSoundEnabled)
-  const [isDraggingRoi, setIsDraggingRoi] = useState(false)
   const previewRef = useRef<HTMLDivElement | null>(null)
-  // ドラッグ中に確定した最新の ROI を、setState のタイミングに左右されず
-  // ポインタアップ時点で即座に読めるようにしておくための ref。
-  const latestRoiRef = useRef(roi)
-  const dragInfoRef = useRef<{
-    startClientX: number
-    startClientY: number
-    startRoi: RoiRect
-    containerW: number
-    containerH: number
-    handle?: HandleId
-  } | null>(null)
+
+  // OCR枠・バーコード枠は別物の矩形として、それぞれ独立に移動・リサイズ・永続化する
+  // （見た目も既定値も localStorage のキーも別々。useDraggableRoi 内部の説明を参照）。
+  // OCR枠はこれまで通り、OCR実行中・使い方パネル表示中はドラッグさせない。
+  const ocrBox = useDraggableRoi(DEFAULT_ROI, loadPersistedRoi, savePersistedRoi, previewRef, ocrBusy || helpOpen)
+  const barcodeBox = useDraggableRoi(DEFAULT_BARCODE_ROI, loadPersistedBarcodeRoi, savePersistedBarcodeRoi, previewRef, helpOpen)
+
+  // バーコード読み取りを枠内だけに絞るか（既定ON）。OFFなら従来通りフレーム全体を対象にする。
+  // このトグルはバーコードモードだけに属する（OCR枠には関係ない）。
+  const [restrictToRoi, setRestrictToRoi] = useState<boolean>(loadRestrictToRoi)
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(loadSoundEnabled)
+
+  // 「読み取り済み」通知（同じ値が既に一覧にあるときの、静かなフィードバック）。
+  // 追加はされない代わりに、枠の上に短く文字を出すだけにする。
+  const [duplicateHintVisible, setDuplicateHintVisible] = useState(false)
+  const duplicateHintTimeoutRef = useRef<number | null>(null)
+  useEffect(() => {
+    return () => {
+      if (duplicateHintTimeoutRef.current !== null) window.clearTimeout(duplicateHintTimeoutRef.current)
+    }
+  }, [])
+  const handleDuplicateHit = useCallback(() => {
+    setDuplicateHintVisible(true)
+    if (duplicateHintTimeoutRef.current !== null) window.clearTimeout(duplicateHintTimeoutRef.current)
+    duplicateHintTimeoutRef.current = window.setTimeout(() => {
+      setDuplicateHintVisible(false)
+      duplicateHintTimeoutRef.current = null
+    }, DUPLICATE_HINT_VISIBLE_MS)
+  }, [])
 
   // バーコード自動除外（マスク）関連。トグルは既定ON。
   const [autoMaskEnabled, setAutoMaskEnabled] = useState(true)
@@ -235,7 +292,11 @@ export function SimpleScanScreen() {
 
   const appendResult = useCallback((source: ResultItem['source'], raw: string, format?: string) => {
     const id = nextIdRef.current++
-    setResults((prev) => [{ id, source, raw, format, at: Date.now() }, ...prev])
+    const item: ResultItem = { id, source, raw, format, at: Date.now() }
+    // ref を state の反映（effect）まで待たずにここで更新する。
+    // 待つと、その間に届いたフレームで同じ値が二重に追加され得るため。
+    resultsRef.current = [item, ...resultsRef.current]
+    setResults((prev) => [item, ...prev])
   }, [])
 
   const handleScan = useCallback(
@@ -245,51 +306,6 @@ export function SimpleScanScreen() {
     [appendResult],
   )
 
-  // ROI 枠のドラッグ（移動 / リサイズ）。Pointer Events + setPointerCapture を使い、
-  // 指がハンドル/枠の外に出てもドラッグ中の要素がそのままイベントを受け続けるようにする
-  // （タッチでもマウスでも同じコードで動く）。handle を渡すとリサイズ、渡さなければ移動。
-  const beginRoiDrag = useCallback(
-    (e: ReactPointerEvent<HTMLElement>, handle?: HandleId) => {
-      if (ocrBusy || helpOpen) return // OCR実行中・使い方パネル表示中は枠をドラッグさせない
-      const container = previewRef.current
-      if (!container) return
-      e.stopPropagation()
-      e.preventDefault()
-      e.currentTarget.setPointerCapture(e.pointerId)
-      dragInfoRef.current = {
-        startClientX: e.clientX,
-        startClientY: e.clientY,
-        startRoi: roi,
-        containerW: container.clientWidth,
-        containerH: container.clientHeight,
-        handle,
-      }
-      setIsDraggingRoi(true)
-    },
-    [ocrBusy, helpOpen, roi],
-  )
-
-  const updateRoiDrag = useCallback((e: ReactPointerEvent<HTMLElement>) => {
-    const info = dragInfoRef.current
-    if (!info || info.containerW <= 0 || info.containerH <= 0) return
-    e.preventDefault()
-    const dx = (e.clientX - info.startClientX) / info.containerW
-    const dy = (e.clientY - info.startClientY) / info.containerH
-    const next = info.handle ? resizeRoi(info.startRoi, info.handle, dx, dy) : moveRoi(info.startRoi, dx, dy)
-    latestRoiRef.current = next
-    setRoi(next)
-  }, [])
-
-  const endRoiDrag = useCallback((e: ReactPointerEvent<HTMLElement>) => {
-    if (!dragInfoRef.current) return
-    dragInfoRef.current = null
-    setIsDraggingRoi(false)
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId)
-    }
-    savePersistedRoi(latestRoiRef.current)
-  }, [])
-
   const handleToggleSound = useCallback(() => {
     setSoundEnabled((prev) => {
       const next = !prev
@@ -298,11 +314,20 @@ export function SimpleScanScreen() {
     })
   }, [])
 
-  const handleResetRoi = useCallback(() => {
-    latestRoiRef.current = DEFAULT_ROI
-    setRoi(DEFAULT_ROI)
-    savePersistedRoi(DEFAULT_ROI)
+  const handleToggleRestrictToRoi = useCallback(() => {
+    setRestrictToRoi((prev) => {
+      const next = !prev
+      saveRestrictToRoi(next)
+      return next
+    })
   }, [])
+
+  // 「枠をリセット」は今のモードが持っている枠だけを既定値に戻す
+  // （もう一方の枠には触れない）。
+  const handleResetRoi = useCallback(() => {
+    if (mode === 'ocr') ocrBox.reset()
+    else barcodeBox.reset()
+  }, [mode, ocrBox, barcodeBox])
 
   // この画面に実在するオーバーレイは「OCR結果カード」と「使い方パネル」の2つだけ
   // （一覧・確認ダイアログ・プロファイル選択などはこの画面には存在しない）。
@@ -314,6 +339,9 @@ export function SimpleScanScreen() {
   // 開いている間は常にバーコード検出を止める。
   const overlaysOpen = useMemo(() => isAnyOverlayOpen({ ocrResultPanelOpen: ocrBusy, helpOpen }), [ocrBusy, helpOpen])
 
+  // バーコード検出を有効にすべきかは isBarcodeScanEnabled（純粋関数）だけで判定する。
+  // 文字（OCR）モードでは、他の条件が何であれ常に無効になる
+  // （＝このモードでは一覧に何も自動追加させない、というのが今回のモード分割の核心）。
   const scanEnabled = useMemo(
     () =>
       isBarcodeScanEnabled({
@@ -322,18 +350,28 @@ export function SimpleScanScreen() {
         pageVisible,
         manualPaused,
         overlaysOpen,
+        mode,
       }),
-    [camera.ready, pageVisible, manualPaused, overlaysOpen],
+    [camera.ready, pageVisible, manualPaused, overlaysOpen, mode],
   )
 
   const { backend, error: scannerError, detectBoxes } = useBarcodeScanner({
     videoRef: camera.videoRef,
     enabled: scanEnabled,
-    // バックエンドは画面が有効な間ずっと保持する（オーバーレイ開閉で作り直さない）
+    // バックエンドは画面が有効な間ずっと保持する（モード切り替えやオーバーレイ開閉で作り直さない）
     active: camera.ready,
-    dedupeMs: DEDUPE_MS,
+    dedupeMs: NOTIFY_WINDOW_MS,
     beep: soundEnabled,
     vibrate: true,
+    // バーコードモード専用の枠（表示座標）。「枠内のみ」ON時は、フック側で
+    // 映像座標へ変換・絞り込みしてもらう。roi・restrictToRoi は ref 経由で読まれるため、
+    // ドラッグや切り替えのたびにフレームループ（バックエンド保持を含む）が張り直されることはない。
+    roi: barcodeBox.roi,
+    restrictToRoi,
+    // 追加の可否は「今その値が結果一覧にあるか」だけで決める。一覧のコピーはフックに渡さず、
+    // 常にこの述語（ref 経由）を通じて呼び出し側の最新の状態を尋ねてもらう。
+    isDuplicate: isDuplicateValue,
+    onDuplicate: handleDuplicateHit,
     onScan: handleScan,
   })
 
@@ -370,7 +408,7 @@ export function SimpleScanScreen() {
   )
 
   const handleShutterOcr = useCallback(() => {
-    if (isDraggingRoi) return // 枠をドラッグ中に誤ってシャッターが走らないようにする
+    if (ocrBox.isDragging) return // 枠をドラッグ中に誤ってシャッターが走らないようにする
     if (helpOpen) return // 使い方パネル表示中は誤操作防止のためOCRを起動しない
     const video = camera.videoRef.current
     if (!video || !camera.ready) {
@@ -380,7 +418,7 @@ export function SimpleScanScreen() {
     // シャッターが押された「その瞬間」の映像全体を、await をまたぐ前に同期的に確定させる。
     // ROI の表示座標→映像座標への変換もこの瞬間の video の表示サイズで行うことで、
     // この後バーコード検出が何ms かかっても「押した瞬間の1枚」を扱い続けられる。
-    const captured = captureFrameAndRoi(video, roi)
+    const captured = captureFrameAndRoi(video, ocrBox.roi)
     setOcrInfo(null)
     setOcrRawText(null)
     setOcrBusy(true)
@@ -404,7 +442,7 @@ export function SimpleScanScreen() {
       setMaskedCount(useMask ? maskRects.length : 0)
       runRecognition(image)
     })
-  }, [isDraggingRoi, helpOpen, camera.videoRef, camera.ready, roi, ensureOcrPreloaded, detectBoxes, autoMaskEnabled, runRecognition])
+  }, [ocrBox.isDragging, ocrBox.roi, helpOpen, camera.videoRef, camera.ready, ensureOcrPreloaded, detectBoxes, autoMaskEnabled, runRecognition])
 
   // 撮影しなおさず、現在の PSM・マスク設定で同じ静止フレームを読み直す
   // （フィルタはここでは無関係）。マスクON/OFFの切り替え後の比較にもこれを使う。
@@ -454,19 +492,50 @@ export function SimpleScanScreen() {
   // OCR結果カードに表示するフィルタ後プレビュー（生テキストは常に別行で見せ続ける）
   const filteredPreview = ocrRawText !== null ? applyOcrFilter(ocrRawText, filterMode) : null
 
+  // 今のモードが持っている枠（表示・ドラッグの対象）
+  const activeBox = mode === 'ocr' ? ocrBox : barcodeBox
+
   return (
     <div className="flex h-full flex-col bg-slate-950 text-slate-100">
-      {/* 使い方（ヘルプ）ボタン。画面のどの状態（カメラエラー中なども含む）でも
-          必ず押せるよう、他の要素より上のレイヤーに固定表示する（実質的な「上部バー」）。 */}
-      <button
-        type="button"
-        onClick={handleOpenHelp}
-        aria-label="使い方を開く"
-        className="fixed right-3 z-40 flex h-11 w-11 items-center justify-center rounded-full bg-slate-900/90 text-lg font-bold text-slate-100 shadow-lg active:bg-slate-800"
-        style={{ top: 'calc(env(safe-area-inset-top) + 0.5rem)' }}
+      {/* 上部バー: モード切り替え（バーコード/文字）と使い方ボタン。
+          常にここに固定されるため、カメラエラー中などどの状態でも必ず押せる。 */}
+      <div
+        className="flex shrink-0 items-center gap-2 border-b border-slate-800 bg-slate-900 p-2"
+        style={{ paddingTop: 'calc(env(safe-area-inset-top) + 0.5rem)' }}
       >
-        ?
-      </button>
+        <div role="tablist" aria-label="読み取りモード" className="flex flex-1 gap-1 rounded-xl bg-slate-800 p-1">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'barcode'}
+            onClick={() => handleChangeMode('barcode')}
+            className={`min-h-10 flex-1 rounded-lg text-sm font-bold transition-colors ${
+              mode === 'barcode' ? 'bg-cyan-500 text-slate-950' : 'text-slate-300 active:bg-slate-700'
+            }`}
+          >
+            バーコード
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'ocr'}
+            onClick={() => handleChangeMode('ocr')}
+            className={`min-h-10 flex-1 rounded-lg text-sm font-bold transition-colors ${
+              mode === 'ocr' ? 'bg-cyan-500 text-slate-950' : 'text-slate-300 active:bg-slate-700'
+            }`}
+          >
+            文字
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={handleOpenHelp}
+          aria-label="使い方を開く"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-800 text-lg font-bold text-slate-100 active:bg-slate-700"
+        >
+          ?
+        </button>
+      </div>
 
       {/* カメラ映像（画面上部） */}
       <div ref={previewRef} className="relative shrink-0 overflow-hidden bg-black" style={{ height: '42vh' }}>
@@ -474,24 +543,44 @@ export function SimpleScanScreen() {
 
         {!camera.error && (
           <div
-            className="absolute touch-none rounded-lg border-2 border-cyan-300/90"
+            // バーコードモード: 「枠内のみ」ON時はこの枠がバーコードの採否を決めるため実線・
+            // 明るめに、OFF時は「今は画面全体が対象で、枠は狙う場所の目安に過ぎない」ことが
+            // 分かるよう破線にする。文字モードでは枠は常にOCRの対象そのものなので常に実線。
+            className={`absolute touch-none rounded-lg border-2 ${
+              mode === 'ocr' || restrictToRoi ? 'border-cyan-300' : 'border-dashed border-cyan-300/70'
+            }`}
             style={
               {
-                left: `${roi.x * 100}%`,
-                top: `${roi.y * 100}%`,
-                width: `${roi.w * 100}%`,
-                height: `${roi.h * 100}%`,
+                left: `${activeBox.roi.x * 100}%`,
+                top: `${activeBox.roi.y * 100}%`,
+                width: `${activeBox.roi.w * 100}%`,
+                height: `${activeBox.roi.h * 100}%`,
                 boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)',
                 cursor: ocrBusy ? undefined : 'move',
               } satisfies CSSProperties
             }
-            onPointerDown={(e) => beginRoiDrag(e)}
-            onPointerMove={updateRoiDrag}
-            onPointerUp={endRoiDrag}
-            onPointerCancel={endRoiDrag}
+            onPointerDown={(e) => activeBox.beginDrag(e)}
+            onPointerMove={activeBox.updateDrag}
+            onPointerUp={activeBox.endDrag}
+            onPointerCancel={activeBox.endDrag}
           >
+            {/* 枠が「何のための枠か」を一目で分かるようにする小さなラベル（枠のすぐ上） */}
+            {!ocrBusy && (
+              <span className="pointer-events-none absolute -top-5 left-0 rounded bg-slate-900/85 px-1.5 py-0.5 text-[9px] font-semibold text-cyan-200">
+                {mode === 'ocr' ? '文字を囲む' : restrictToRoi ? '読み取り範囲: 枠内のみ' : '読み取り範囲: 画面全体'}
+              </span>
+            )}
+
+            {/* バーコードモード: 一覧に既にある値を検出したときの、静かな「読み取り済み」通知。
+                追加はされない代わりに、枠の中央に短く表示するだけに留める（連打はしない）。 */}
+            {mode === 'barcode' && duplicateHintVisible && (
+              <span className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full bg-slate-900/90 px-3 py-1.5 text-xs font-bold text-amber-300 shadow-lg">
+                読み取り済み
+              </span>
+            )}
+
             {/* OCR実行中は、実際に読み取っている静止画をこの枠内に重ねて表示する */}
-            {ocrBusy && capturedImage && (
+            {mode === 'ocr' && ocrBusy && capturedImage && (
               <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-lg bg-black">
                 <CapturedImageCanvas image={capturedImage} className="h-full w-full" />
                 <div className="absolute inset-0 flex items-center justify-center gap-2 bg-slate-950/40">
@@ -513,10 +602,10 @@ export function SimpleScanScreen() {
                   role="presentation"
                   className="absolute z-10 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 touch-none items-center justify-center"
                   style={{ left: h.left, top: h.top, cursor: h.cursor }}
-                  onPointerDown={(e) => beginRoiDrag(e, h.id)}
-                  onPointerMove={updateRoiDrag}
-                  onPointerUp={endRoiDrag}
-                  onPointerCancel={endRoiDrag}
+                  onPointerDown={(e) => activeBox.beginDrag(e, h.id)}
+                  onPointerMove={activeBox.updateDrag}
+                  onPointerUp={activeBox.endDrag}
+                  onPointerCancel={activeBox.endDrag}
                 >
                   <span className="h-3 w-3 rounded-full border-2 border-cyan-300 bg-slate-950/80" />
                 </span>
@@ -534,7 +623,7 @@ export function SimpleScanScreen() {
           </div>
         )}
 
-        {manualPaused && !camera.error && (
+        {mode === 'barcode' && manualPaused && !camera.error && (
           <div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 flex -translate-y-1/2 justify-center px-4">
             <span className="flex items-center gap-2 rounded-full bg-red-600/95 px-4 py-2 text-sm font-bold text-white shadow-xl">
               <PauseIcon className="h-4 w-4" /> 読み取り停止中
@@ -548,13 +637,15 @@ export function SimpleScanScreen() {
           </div>
         )}
 
-        {/* 右上は固定表示の「?」ヘルプボタンと重なるため、その分だけ左に寄せる。
-            解像度は「実際に端末が提供している値」の診断表示（あくまで補助情報なので
-            バックエンド表示のすぐ横に小さく添えるだけに留め、目立たせすぎない）。 */}
-        <span className="absolute right-14 top-2 rounded-lg bg-slate-900/80 px-2 py-1 text-[10px] font-semibold text-slate-300">
-          BC: {backendLabel}
-          {camera.resolution && ` / ${camera.resolution.width}×${camera.resolution.height}`}
-        </span>
+        {/* 解像度はどちらのモードでも画質の診断に使えるため常に表示する。
+            バーコードのバックエンド名はバーコードモードでスキャンしているときだけの情報。 */}
+        {(mode === 'barcode' || camera.resolution) && (
+          <span className="absolute right-2 top-2 rounded-lg bg-slate-900/80 px-2 py-1 text-[10px] font-semibold text-slate-300">
+            {mode === 'barcode' && `BC: ${backendLabel}`}
+            {mode === 'barcode' && camera.resolution && ' / '}
+            {camera.resolution && `${camera.resolution.width}×${camera.resolution.height}`}
+          </span>
+        )}
 
         {!camera.error && (
           <button
@@ -594,13 +685,13 @@ export function SimpleScanScreen() {
 
       {/* コントロール */}
       <div className="flex shrink-0 flex-col gap-2 border-b border-slate-800 bg-slate-900 p-3">
-        {showFirstUseHint && !ocrBusy && (
+        {mode === 'ocr' && showFirstUseHint && !ocrBusy && (
           <p className="text-center text-[11px] text-slate-400">
             初回のみOCRエンジン（約9MB）をダウンロードします。次回からはオフラインで利用できます。
           </p>
         )}
 
-        {ocrBusy && ocrProgress && (
+        {mode === 'ocr' && ocrBusy && ocrProgress && (
           <div className="flex items-center gap-2 rounded bg-slate-800 px-3 py-1.5 text-[11px] text-cyan-100">
             <SpinnerIcon className="h-3.5 w-3.5 shrink-0" />
             <span className="flex-1 truncate">{ocrProgress.status}</span>
@@ -608,8 +699,10 @@ export function SimpleScanScreen() {
           </div>
         )}
 
-        {/* OCR結果カード: 直近の読み取り結果と、このアプリで唯一の設定（PSM・抽出フィルタ） */}
-        {!ocrBusy && capturedImage && ocrInfo && (
+        {/* OCR結果カード: 直近の読み取り結果と、このアプリで唯一の設定（PSM・抽出フィルタ）。
+            文字モードだけに属する UI であり、バーコードモードでは（処理中の状態が
+            残っていても）表示しない。 */}
+        {mode === 'ocr' && !ocrBusy && capturedImage && ocrInfo && (
           <div className="flex flex-col gap-2 rounded-lg bg-slate-800 p-2.5">
             <div className="flex items-center gap-2">
               <div className="shrink-0 overflow-hidden rounded border border-slate-700 bg-black">
@@ -688,40 +781,58 @@ export function SimpleScanScreen() {
         )}
 
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setManualPaused((p) => !p)}
-            aria-pressed={manualPaused}
-            className={`flex min-h-14 items-center gap-1.5 rounded-xl px-3 text-xs font-bold ${
-              manualPaused ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-slate-200'
-            }`}
-          >
-            {manualPaused ? <PlayIcon className="h-4 w-4" /> : <PauseIcon className="h-4 w-4" />}
-            {manualPaused ? '再開' : '一時停止'}
-          </button>
+          {mode === 'barcode' && (
+            <>
+              <button
+                type="button"
+                onClick={() => setManualPaused((p) => !p)}
+                aria-pressed={manualPaused}
+                className={`flex min-h-14 flex-1 items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-bold ${
+                  manualPaused ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-slate-200'
+                }`}
+              >
+                {manualPaused ? <PlayIcon className="h-4 w-4" /> : <PauseIcon className="h-4 w-4" />}
+                {manualPaused ? '再開' : '一時停止'}
+              </button>
 
-          <Button
-            variant="primary"
-            size="lg"
-            loading={ocrBusy}
-            disabled={helpOpen}
-            onClick={handleShutterOcr}
-            className="flex-1 shadow-xl"
-          >
-            {!ocrBusy && <ScanIcon className="h-5 w-5" />} 枠内をOCR
-          </Button>
+              <button
+                type="button"
+                onClick={handleToggleRestrictToRoi}
+                aria-label="バーコードを枠内だけで読み取る"
+                aria-pressed={restrictToRoi}
+                className={`flex min-h-14 items-center justify-center rounded-xl px-3 text-[11px] font-bold ${
+                  restrictToRoi ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-400'
+                }`}
+              >
+                枠内のみ
+              </button>
 
-          <button
-            type="button"
-            onClick={handleToggleSound}
-            aria-label="読み取り音を切り替える"
-            aria-pressed={soundEnabled}
-            className={`flex min-h-14 items-center justify-center rounded-xl px-3 ${
-              soundEnabled ? 'bg-slate-800 text-slate-200' : 'bg-slate-800 text-slate-500'
-            }`}
-          >
-            {soundEnabled ? <SoundOnIcon className="h-5 w-5" /> : <SoundOffIcon className="h-5 w-5" />}
-          </button>
+              <button
+                type="button"
+                onClick={handleToggleSound}
+                aria-label="読み取り音を切り替える"
+                aria-pressed={soundEnabled}
+                className={`flex min-h-14 items-center justify-center rounded-xl px-3 ${
+                  soundEnabled ? 'bg-slate-800 text-slate-200' : 'bg-slate-800 text-slate-500'
+                }`}
+              >
+                {soundEnabled ? <SoundOnIcon className="h-5 w-5" /> : <SoundOffIcon className="h-5 w-5" />}
+              </button>
+            </>
+          )}
+
+          {mode === 'ocr' && (
+            <Button
+              variant="primary"
+              size="lg"
+              loading={ocrBusy}
+              disabled={helpOpen}
+              onClick={handleShutterOcr}
+              className="flex-1 shadow-xl"
+            >
+              {!ocrBusy && <ScanIcon className="h-5 w-5" />} 枠内をOCR
+            </Button>
+          )}
 
           {camera.torchSupported && (
             <button

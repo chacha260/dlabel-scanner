@@ -6,6 +6,8 @@ import { createNativeReader, isNativeAvailable } from './native'
 
 export type { BarcodeHit, BarcodeInput, BarcodeReader, NormalizedRect } from './types'
 export { SUPPORTED_FORMATS } from './types'
+export { selectNewHits } from './dedupe'
+export { filterHitsByRoi, isHitInRoi } from './roiFilter'
 
 export type BarcodeBackend = 'native' | 'zxing'
 

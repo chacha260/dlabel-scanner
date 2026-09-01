@@ -44,6 +44,7 @@ describe('isBarcodeScanEnabled', () => {
     pageVisible: true,
     manualPaused: false,
     overlaysOpen: false,
+    mode: 'barcode' as const,
   }
 
   it('すべての条件が満たされていれば true', () => {
@@ -81,6 +82,14 @@ describe('isBarcodeScanEnabled', () => {
     const result = isBarcodeScanEnabled({ ...baseInputs, manualPaused: true, overlaysOpen: false })
     expect(result).toBe(false)
   })
+
+  it('文字（OCR）モードでは、他の条件が全て揃っていても false になる', () => {
+    expect(isBarcodeScanEnabled({ ...baseInputs, mode: 'ocr' })).toBe(false)
+  })
+
+  it('バーコードモードで、他に何も阻害要因が無ければ true になる', () => {
+    expect(isBarcodeScanEnabled({ ...baseInputs, mode: 'barcode' })).toBe(true)
+  })
 })
 
 describe('helpOpen（使い方パネル）と isBarcodeScanEnabled の組み合わせ', () => {
@@ -90,6 +99,7 @@ describe('helpOpen（使い方パネル）と isBarcodeScanEnabled の組み合�
     pageVisible: true,
     manualPaused: false,
     overlaysOpen: false,
+    mode: 'barcode' as const,
   }
 
   it('ヘルプを開くとバーコード検出が無効になる', () => {

@@ -7,13 +7,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mapCoverRectToVideo } from '../geometry'
 import {
   clampRoi,
+  DEFAULT_BARCODE_ROI,
   DEFAULT_ROI,
   isValidRoiRect,
+  loadPersistedBarcodeRoi,
   loadPersistedRoi,
   MIN_ROI_H,
   MIN_ROI_W,
   moveRoi,
   resizeRoi,
+  savePersistedBarcodeRoi,
   savePersistedRoi,
 } from '../roi'
 
@@ -194,6 +197,70 @@ describe('loadPersistedRoi / savePersistedRoi（localStorage の読み書き）'
     const rect = { x: 0.15, y: 0.3, w: 0.6, h: 0.15 }
     savePersistedRoi(rect)
     expect(loadPersistedRoi()).toEqual(rect)
+  })
+})
+
+describe('OCR枠とバーコード枠の永続化（別々の localStorage キーで、互いに上書きしない）', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function fakeLocalStorage() {
+    const store = new Map<string, string>()
+    return {
+      store,
+      impl: {
+        getItem: (key: string) => store.get(key) ?? null,
+        setItem: (key: string, value: string) => store.set(key, value),
+      },
+    }
+  }
+
+  it('2つの枠は既定値からして別物である', () => {
+    expect(DEFAULT_BARCODE_ROI).not.toEqual(DEFAULT_ROI)
+  })
+
+  it('保存されていない場合、バーコード枠は自分自身の既定値（DEFAULT_BARCODE_ROI）を返す', () => {
+    const { impl } = fakeLocalStorage()
+    vi.stubGlobal('localStorage', impl)
+    expect(loadPersistedBarcodeRoi()).toEqual(DEFAULT_BARCODE_ROI)
+  })
+
+  it('OCR枠を保存してもバーコード枠には影響せず、バーコード枠を保存してもOCR枠には影響しない', () => {
+    const { impl } = fakeLocalStorage()
+    vi.stubGlobal('localStorage', impl)
+
+    const ocrRect = { x: 0.15, y: 0.3, w: 0.6, h: 0.15 }
+    const barcodeRect = { x: 0.05, y: 0.4, w: 0.9, h: 0.3 }
+
+    savePersistedRoi(ocrRect)
+    expect(loadPersistedBarcodeRoi()).toEqual(DEFAULT_BARCODE_ROI) // まだ触っていないので既定値のまま
+
+    savePersistedBarcodeRoi(barcodeRect)
+    expect(loadPersistedRoi()).toEqual(ocrRect) // OCR枠は barcode 保存の影響を受けない
+    expect(loadPersistedBarcodeRoi()).toEqual(barcodeRect)
+  })
+
+  it('壊れた値が保存されていても、バーコード枠は自分自身の既定値にフォールバックする（OCR枠の既定値ではない）', () => {
+    const { impl, store } = fakeLocalStorage()
+    vi.stubGlobal('localStorage', impl)
+    store.set('dlabel-scanner:barcodeRoi', '{not valid json')
+    expect(loadPersistedBarcodeRoi()).toEqual(DEFAULT_BARCODE_ROI)
+  })
+
+  it('範囲外の値が保存されていても、バーコード枠は自分自身の既定値にフォールバックする', () => {
+    const { impl, store } = fakeLocalStorage()
+    vi.stubGlobal('localStorage', impl)
+    store.set('dlabel-scanner:barcodeRoi', JSON.stringify({ x: 2, y: 2, w: 0.1, h: 0.1 }))
+    expect(loadPersistedBarcodeRoi()).toEqual(DEFAULT_BARCODE_ROI)
+  })
+
+  it('妥当な値は保存した通りに読み戻せる', () => {
+    const { impl } = fakeLocalStorage()
+    vi.stubGlobal('localStorage', impl)
+    const rect = { x: 0.1, y: 0.35, w: 0.7, h: 0.25 }
+    savePersistedBarcodeRoi(rect)
+    expect(loadPersistedBarcodeRoi()).toEqual(rect)
   })
 })
 

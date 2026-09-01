@@ -167,6 +167,9 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
         pageVisible,
         manualPaused,
         overlaysOpen,
+        // このレガシー画面はモード分割前の唯一の画面であり、常にバーコードモード相当
+        // （継続的なバーコード検出が既定の唯一の挙動）として扱う。
+        mode: 'barcode',
       }),
     [enabled, camera.ready, pageVisible, manualPaused, overlaysOpen],
   )

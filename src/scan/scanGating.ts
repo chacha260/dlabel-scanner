@@ -41,6 +41,15 @@ export function isAnyOverlayOpen(flags: OverlayFlags): boolean {
   )
 }
 
+/**
+ * この画面の2つの読み取りモード。
+ * - 'barcode': 継続的なバーコード検出をONにする（従来の挙動）
+ * - 'ocr'    : 継続的なバーコード検出をOFFにする。ユーザーが明示的にシャッターで
+ *              読んだものだけを一覧に追加させたいための分離であり、これが
+ *              モード分割の核心。他の条件が全て揃っていてもこのモードでは無効にする。
+ */
+export type ScanMode = 'barcode' | 'ocr'
+
 export type ScanGateInputs = {
   /** タブがスキャン画面で、かつカメラを起動すべき状態か（App.tsx 側のタブ切り替え） */
   tabActive: boolean
@@ -52,6 +61,8 @@ export type ScanGateInputs = {
   manualPaused: boolean
   /** 何らかのオーバーレイが開いているか（isAnyOverlayOpen の結果） */
   overlaysOpen: boolean
+  /** 現在の読み取りモード。'ocr' のときは他の条件によらず常に無効にする */
+  mode: ScanMode
 }
 
 /**
@@ -60,6 +71,7 @@ export type ScanGateInputs = {
  */
 export function isBarcodeScanEnabled(inputs: ScanGateInputs): boolean {
   return (
+    inputs.mode === 'barcode' &&
     inputs.tabActive &&
     inputs.cameraReady &&
     inputs.pageVisible &&
