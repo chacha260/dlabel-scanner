@@ -2,10 +2,10 @@
 // パフォーマンスが最優先: 10fps 上限・処理中フレームのスキップ・
 // 720px へのダウンスケール・ref による状態管理（毎フレーム setState しない）を徹底する。
 
-import { type RefObject, useEffect, useRef, useState } from 'react'
+import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 import type { RawScan } from '../parse/types'
 import { createBarcodeReader } from './barcode'
-import type { BarcodeBackend, BarcodeHit, BarcodeReader } from './barcode'
+import type { BarcodeBackend, BarcodeHit, BarcodeReader, NormalizedRect } from './barcode'
 
 export type UseBarcodeScannerOptions = {
   videoRef: RefObject<HTMLVideoElement | null>
@@ -29,6 +29,14 @@ export type UseBarcodeScannerResult = {
   backend: BarcodeBackend | null
   lastHit: BarcodeHit | null
   error: string | null
+  /**
+   * フレームループが保持しているのと同じバックエンド（ネイティブ / zxing-wasm）で、
+   * 与えられた1枚の画像に対してバーコード検出だけを行い、検出できた枠（映像座標）を返す。
+   * シャッター押下時の OCR マスキング用。ここで新しい BarcodeDetector や zxing の
+   * Worker を作ることは絶対にしない（フレームループが持つ readerRef を再利用する）。
+   * 検出に失敗しても例外を投げず、空配列を返す（呼び出し側はマスクなしで続行できる）。
+   */
+  detectBoxes: (source: OffscreenCanvas) => Promise<NormalizedRect[]>
 }
 
 const FRAME_INTERVAL_MS = 100 // 10fps 上限
@@ -263,5 +271,19 @@ export function useBarcodeScanner({
     }
   }, [])
 
-  return { backend, lastHit, error }
+  // シャッター押下時の1回限りの検出。フレームループと同じ readerRef を使い回す
+  // （新しいバックエンドを作らない）。失敗しても投げずに空配列を返す。
+  const detectBoxes = useCallback(async (source: OffscreenCanvas): Promise<NormalizedRect[]> => {
+    const reader = readerRef.current
+    if (!reader) return []
+    try {
+      const bitmap = await createImageBitmap(source)
+      const hits = await reader.detect(bitmap)
+      return hits.flatMap((hit) => (hit.box ? [hit.box] : []))
+    } catch {
+      return []
+    }
+  }, [])
+
+  return { backend, lastHit, error, detectBoxes }
 }

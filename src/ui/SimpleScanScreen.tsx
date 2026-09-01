@@ -7,26 +7,36 @@
 // 実際に何が必要かを確認するためのもの。ラベル定義エディタ・履歴・CSV書き出し・
 // 設定画面などの既存機能は src/ui/legacy 以下に退避してあり、削除はしていない。
 
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RawScan } from '../parse/types'
+import type { NormalizedRect } from '../scan/barcode/types'
 import { useCamera } from '../camera/useCamera'
 import { useBarcodeScanner } from '../scan/useBarcodeScanner'
 import { isAnyOverlayOpen, isBarcodeScanEnabled } from '../scan/scanGating'
 import {
   applyOcrFilter,
-  captureRoi,
+  boxesToMask,
+  captureFrameAndRoi,
+  cropVideoSpaceRoi,
   DEFAULT_OCR_OPTIONS,
+  DEFAULT_ROI,
   hasOcrEngineCached,
+  loadPersistedRoi,
+  moveRoi,
   OCR_FILTER_LABELS,
   preloadOcr,
   recognizeCaptured,
+  resizeRoi,
+  savePersistedRoi,
+  type HandleId,
   type OcrFilterMode,
   type OcrOptions,
   type OcrProgress,
   type RoiRect,
 } from '../scan/ocr'
 import { Button } from './components/Button'
-import { Select } from './components/Controls'
+import { Select, Switch } from './components/Controls'
 import { CloseIcon, CopyIcon, FlashIcon, FlashOffIcon, PauseIcon, PlayIcon, ScanIcon, SpinnerIcon, WarningIcon } from './components/Icons'
 import { showToast } from './components/toastBus'
 import { copyToClipboard, sourceBadgeClass, sourceBadgeLabel } from './lib'
@@ -36,8 +46,29 @@ const BEEP_ENABLED = true
 const VIBRATE_ENABLED = true
 const DEDUPE_MS = 1500
 
-// ROI: 画面中央よりやや上（相対座標 0..1）。ScanScreen.tsx と同じ値を流用する。
-const ROI: RoiRect = { x: 0.1, y: 0.26, w: 0.8, h: 0.18 }
+// ROI 枠のリサイズハンドル定義（表示上の位置と、掴んだときのカーソル形状）。
+// 実際の当たり判定は h-11 w-11（44px 角）で、見た目の小さな丸印より大きく取る
+// （指でも掴みやすいように）。
+const RESIZE_HANDLES: { id: HandleId; left: string; top: string; cursor: string }[] = [
+  { id: 'nw', left: '0%', top: '0%', cursor: 'nwse-resize' },
+  { id: 'n', left: '50%', top: '0%', cursor: 'ns-resize' },
+  { id: 'ne', left: '100%', top: '0%', cursor: 'nesw-resize' },
+  { id: 'e', left: '100%', top: '50%', cursor: 'ew-resize' },
+  { id: 'se', left: '100%', top: '100%', cursor: 'nwse-resize' },
+  { id: 's', left: '50%', top: '100%', cursor: 'ns-resize' },
+  { id: 'sw', left: '0%', top: '100%', cursor: 'nesw-resize' },
+  { id: 'w', left: '0%', top: '50%', cursor: 'ew-resize' },
+]
+
+// シャッターを押した瞬間の静止フレームと、その時点での ROI（映像座標）・
+// 検出済みバーコード枠（ROI と重なるものだけ、マージン込み・映像座標）をまとめて保持する。
+// 「同じ画像で再認識」やマスクON/OFFの切り替えは、この静止フレームに対して
+// 再度クロップし直すだけで完結させ、都度カメラや検出をやり直さない。
+type CapturedFrameState = {
+  frame: OffscreenCanvas
+  videoRoi: RoiRect
+  maskRects: NormalizedRect[]
+}
 
 const PSM_OPTIONS: { value: OcrOptions['psm']; label: string }[] = [
   { value: '7', label: '単一行' },
@@ -106,6 +137,30 @@ export function SimpleScanScreen() {
   const [psm, setPsm] = useState<OcrOptions['psm']>(DEFAULT_OCR_OPTIONS.psm)
   const [filterMode, setFilterMode] = useState<OcrFilterMode>('raw')
 
+  // OCR枠（表示座標、0..1）。移動・リサイズ可能で、矩形だけ localStorage に永続化する
+  // （これは UI 上の好み設定であり、スキャン結果自体はこれまで通りメモリ上のみ）。
+  const [roi, setRoi] = useState<RoiRect>(() => loadPersistedRoi())
+  const [isDraggingRoi, setIsDraggingRoi] = useState(false)
+  const previewRef = useRef<HTMLDivElement | null>(null)
+  // ドラッグ中に確定した最新の ROI を、setState のタイミングに左右されず
+  // ポインタアップ時点で即座に読めるようにしておくための ref。
+  const latestRoiRef = useRef(roi)
+  const dragInfoRef = useRef<{
+    startClientX: number
+    startClientY: number
+    startRoi: RoiRect
+    containerW: number
+    containerH: number
+    handle?: HandleId
+  } | null>(null)
+
+  // バーコード自動除外（マスク）関連。トグルは既定ON。
+  const [autoMaskEnabled, setAutoMaskEnabled] = useState(true)
+  const [maskedCount, setMaskedCount] = useState(0)
+  // シャッター押下時点の静止フレーム一式。「同じ画像で再認識」やマスクON/OFFの
+  // 切り替え後の再クロップに使う（撮り直しはしない）。
+  const capturedFrameRef = useRef<CapturedFrameState | null>(null)
+
   const preloadTriggeredRef = useRef(false)
   const ensureOcrPreloaded = useCallback(() => {
     if (preloadTriggeredRef.current) return
@@ -140,6 +195,57 @@ export function SimpleScanScreen() {
     [appendResult],
   )
 
+  // ROI 枠のドラッグ（移動 / リサイズ）。Pointer Events + setPointerCapture を使い、
+  // 指がハンドル/枠の外に出てもドラッグ中の要素がそのままイベントを受け続けるようにする
+  // （タッチでもマウスでも同じコードで動く）。handle を渡すとリサイズ、渡さなければ移動。
+  const beginRoiDrag = useCallback(
+    (e: ReactPointerEvent<HTMLElement>, handle?: HandleId) => {
+      if (ocrBusy) return // OCR実行中は枠のプレビューを表示中なのでドラッグさせない
+      const container = previewRef.current
+      if (!container) return
+      e.stopPropagation()
+      e.preventDefault()
+      e.currentTarget.setPointerCapture(e.pointerId)
+      dragInfoRef.current = {
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startRoi: roi,
+        containerW: container.clientWidth,
+        containerH: container.clientHeight,
+        handle,
+      }
+      setIsDraggingRoi(true)
+    },
+    [ocrBusy, roi],
+  )
+
+  const updateRoiDrag = useCallback((e: ReactPointerEvent<HTMLElement>) => {
+    const info = dragInfoRef.current
+    if (!info || info.containerW <= 0 || info.containerH <= 0) return
+    e.preventDefault()
+    const dx = (e.clientX - info.startClientX) / info.containerW
+    const dy = (e.clientY - info.startClientY) / info.containerH
+    const next = info.handle ? resizeRoi(info.startRoi, info.handle, dx, dy) : moveRoi(info.startRoi, dx, dy)
+    latestRoiRef.current = next
+    setRoi(next)
+  }, [])
+
+  const endRoiDrag = useCallback((e: ReactPointerEvent<HTMLElement>) => {
+    if (!dragInfoRef.current) return
+    dragInfoRef.current = null
+    setIsDraggingRoi(false)
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId)
+    }
+    savePersistedRoi(latestRoiRef.current)
+  }, [])
+
+  const handleResetRoi = useCallback(() => {
+    latestRoiRef.current = DEFAULT_ROI
+    setRoi(DEFAULT_ROI)
+    savePersistedRoi(DEFAULT_ROI)
+  }, [])
+
   // この画面に実在するオーバーレイは「OCR結果カード」だけ（一覧・確認ダイアログ・
   // プロファイル選択などはこの画面には存在しない）。isAnyOverlayOpen は汎用の
   // 純粋関数のまま流用し、渡すフラグだけを実在するものに絞る。
@@ -160,7 +266,7 @@ export function SimpleScanScreen() {
     [camera.ready, pageVisible, manualPaused, overlaysOpen],
   )
 
-  const { backend, error: scannerError } = useBarcodeScanner({
+  const { backend, error: scannerError, detectBoxes } = useBarcodeScanner({
     videoRef: camera.videoRef,
     enabled: scanEnabled,
     // バックエンドは画面が有効な間ずっと保持する（オーバーレイ開閉で作り直さない）
@@ -204,30 +310,59 @@ export function SimpleScanScreen() {
   )
 
   const handleShutterOcr = useCallback(() => {
+    if (isDraggingRoi) return // 枠をドラッグ中に誤ってシャッターが走らないようにする
     const video = camera.videoRef.current
     if (!video || !camera.ready) {
       showToast('カメラの準備ができていません', 'error')
       return
     }
-    // シャッターが押された「その瞬間」の映像を、await をまたぐ前に同期的に確定させる。
-    const image = captureRoi(video, ROI)
-    setCapturedImage(image)
+    // シャッターが押された「その瞬間」の映像全体を、await をまたぐ前に同期的に確定させる。
+    // ROI の表示座標→映像座標への変換もこの瞬間の video の表示サイズで行うことで、
+    // この後バーコード検出が何ms かかっても「押した瞬間の1枚」を扱い続けられる。
+    const captured = captureFrameAndRoi(video, roi)
     setOcrInfo(null)
     setOcrRawText(null)
+    setOcrBusy(true)
+    setOcrProgress(null)
     ensureOcrPreloaded()
-    runRecognition(image)
-  }, [camera.videoRef, camera.ready, ensureOcrPreloaded, runRecognition])
 
-  // 撮影しなおさず、現在の PSM で同じ画像を読み直す（再認識のみ。フィルタはここでは無関係）
+    // バーコード検出はフレームループが持つのと同じリーダーを再利用し、
+    // シャッター1回につき1回だけ行う（フレームごとには絶対に行わない）。
+    // detectBoxes は失敗しても例外を投げず空配列を返す設計なので、ここでは
+    // マスクなしで続行するフォールバックだけ考えればよい。
+    void detectBoxes(captured.frame).then((boxes) => {
+      const maskRects = boxesToMask(boxes, captured.videoRoi)
+      capturedFrameRef.current = { frame: captured.frame, videoRoi: captured.videoRoi, maskRects }
+      const useMask = autoMaskEnabled && maskRects.length > 0
+      const image = cropVideoSpaceRoi(captured.frame, captured.videoRoi, useMask ? maskRects : undefined)
+      setCapturedImage(image)
+      setMaskedCount(useMask ? maskRects.length : 0)
+      runRecognition(image)
+    })
+  }, [isDraggingRoi, camera.videoRef, camera.ready, roi, ensureOcrPreloaded, detectBoxes, autoMaskEnabled, runRecognition])
+
+  // 撮影しなおさず、現在の PSM・マスク設定で同じ静止フレームを読み直す
+  // （フィルタはここでは無関係）。マスクON/OFFの切り替え後の比較にもこれを使う。
   const handleRetrySameImage = useCallback(() => {
-    if (!capturedImage) return
-    runRecognition(capturedImage)
-  }, [capturedImage, runRecognition])
+    const captured = capturedFrameRef.current
+    if (!captured) return
+    const maskRects = autoMaskEnabled ? captured.maskRects : []
+    const image = cropVideoSpaceRoi(captured.frame, captured.videoRoi, maskRects.length > 0 ? maskRects : undefined)
+    setCapturedImage(image)
+    setMaskedCount(maskRects.length)
+    runRecognition(image)
+  }, [autoMaskEnabled, runRecognition])
 
   const handleDismissCapturedImage = useCallback(() => {
     setCapturedImage(null)
     setOcrInfo(null)
     setOcrRawText(null)
+    setMaskedCount(0)
+    capturedFrameRef.current = null
+  }, [])
+
+  const handleToggleAutoMask = useCallback((checked: boolean) => {
+    setAutoMaskEnabled(checked)
   }, [])
 
   const handleCopyRow = useCallback(async (value: string) => {
@@ -257,23 +392,30 @@ export function SimpleScanScreen() {
   return (
     <div className="flex h-full flex-col bg-slate-950 text-slate-100">
       {/* カメラ映像（画面上部） */}
-      <div className="relative shrink-0 overflow-hidden bg-black" style={{ height: '42vh' }}>
+      <div ref={previewRef} className="relative shrink-0 overflow-hidden bg-black" style={{ height: '42vh' }}>
         <video ref={camera.videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
 
         {!camera.error && (
           <div
-            className="pointer-events-none absolute rounded-lg border-2 border-cyan-300/90"
-            style={{
-              left: `${ROI.x * 100}%`,
-              top: `${ROI.y * 100}%`,
-              width: `${ROI.w * 100}%`,
-              height: `${ROI.h * 100}%`,
-              boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)',
-            }}
+            className="absolute touch-none rounded-lg border-2 border-cyan-300/90"
+            style={
+              {
+                left: `${roi.x * 100}%`,
+                top: `${roi.y * 100}%`,
+                width: `${roi.w * 100}%`,
+                height: `${roi.h * 100}%`,
+                boxShadow: '0 0 0 9999px rgba(0,0,0,0.55)',
+                cursor: ocrBusy ? undefined : 'move',
+              } satisfies CSSProperties
+            }
+            onPointerDown={(e) => beginRoiDrag(e)}
+            onPointerMove={updateRoiDrag}
+            onPointerUp={endRoiDrag}
+            onPointerCancel={endRoiDrag}
           >
             {/* OCR実行中は、実際に読み取っている静止画をこの枠内に重ねて表示する */}
             {ocrBusy && capturedImage && (
-              <div className="absolute inset-0 overflow-hidden rounded-lg bg-black">
+              <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-lg bg-black">
                 <CapturedImageCanvas image={capturedImage} className="h-full w-full" />
                 <div className="absolute inset-0 flex items-center justify-center gap-2 bg-slate-950/40">
                   <SpinnerIcon className="h-5 w-5 text-cyan-300" />
@@ -281,10 +423,27 @@ export function SimpleScanScreen() {
                 </div>
               </div>
             )}
-            <span className="absolute -left-0.5 -top-0.5 h-5 w-5 rounded-tl border-l-4 border-t-4 border-cyan-300" />
-            <span className="absolute -right-0.5 -top-0.5 h-5 w-5 rounded-tr border-r-4 border-t-4 border-cyan-300" />
-            <span className="absolute -bottom-0.5 -left-0.5 h-5 w-5 rounded-bl border-b-4 border-l-4 border-cyan-300" />
-            <span className="absolute -bottom-0.5 -right-0.5 h-5 w-5 rounded-br border-b-4 border-r-4 border-cyan-300" />
+            <span className="pointer-events-none absolute -left-0.5 -top-0.5 h-5 w-5 rounded-tl border-l-4 border-t-4 border-cyan-300" />
+            <span className="pointer-events-none absolute -right-0.5 -top-0.5 h-5 w-5 rounded-tr border-r-4 border-t-4 border-cyan-300" />
+            <span className="pointer-events-none absolute -bottom-0.5 -left-0.5 h-5 w-5 rounded-bl border-b-4 border-l-4 border-cyan-300" />
+            <span className="pointer-events-none absolute -bottom-0.5 -right-0.5 h-5 w-5 rounded-br border-b-4 border-r-4 border-cyan-300" />
+
+            {/* リサイズハンドル: 見た目は小さな丸印だが、当たり判定は指でも掴みやすい44px角 */}
+            {!ocrBusy &&
+              RESIZE_HANDLES.map((h) => (
+                <span
+                  key={h.id}
+                  role="presentation"
+                  className="absolute z-10 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 touch-none items-center justify-center"
+                  style={{ left: h.left, top: h.top, cursor: h.cursor }}
+                  onPointerDown={(e) => beginRoiDrag(e, h.id)}
+                  onPointerMove={updateRoiDrag}
+                  onPointerUp={endRoiDrag}
+                  onPointerCancel={endRoiDrag}
+                >
+                  <span className="h-3 w-3 rounded-full border-2 border-cyan-300 bg-slate-950/80" />
+                </span>
+              ))}
           </div>
         )}
 
@@ -315,6 +474,16 @@ export function SimpleScanScreen() {
         <span className="absolute right-2 top-2 rounded-lg bg-slate-900/80 px-2 py-1 text-[10px] font-semibold text-slate-300">
           BC: {backendLabel}
         </span>
+
+        {!camera.error && (
+          <button
+            type="button"
+            onClick={handleResetRoi}
+            className="absolute left-2 top-2 rounded-lg bg-slate-900/80 px-2 py-1 text-[10px] font-semibold text-slate-300 active:bg-slate-800"
+          >
+            枠をリセット
+          </button>
+        )}
       </div>
 
       {/* コントロール */}
@@ -363,6 +532,12 @@ export function SimpleScanScreen() {
               </button>
             </div>
 
+            {maskedCount > 0 && (
+              <p className="rounded bg-cyan-950/60 px-2 py-1 text-[11px] font-semibold text-cyan-200">
+                バーコード {maskedCount} 箇所を除外して読み取りました
+              </p>
+            )}
+
             {/* 生テキストは常に表示し続ける。フィルタはあくまで JS側の後処理であって
                 エンジンの認識結果そのものを隠さない（「実際に何が読めたか」を必ず見せる） */}
             <div className="rounded bg-slate-950 p-2">
@@ -396,6 +571,13 @@ export function SimpleScanScreen() {
                 aria-label="抽出フィルタ"
               />
             </div>
+
+            <Switch
+              checked={autoMaskEnabled}
+              onChange={handleToggleAutoMask}
+              label="バーコードを自動で除外"
+              hint="枠内で検出したバーコードを塗りつぶしてから読み取ります。OFFにして「同じ画像で再認識」を押すと塗りつぶさずに読み直せます。"
+            />
           </div>
         )}
 

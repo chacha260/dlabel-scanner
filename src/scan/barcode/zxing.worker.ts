@@ -2,11 +2,11 @@
 // zxing-wasm を使ってバーコードをデコードする。メインバンドルには含まれず、
 // ネイティブ実装が使えないときだけ src/scan/barcode/index.ts から生成される。
 
-import { prepareZXingModule, readBarcodes, type ReadInputBarcodeFormat } from 'zxing-wasm/reader'
+import { prepareZXingModule, readBarcodes, type Position, type ReadInputBarcodeFormat } from 'zxing-wasm/reader'
 // wasm 本体はネットワーク不要で自前ホスト（CDN 参照はオフライン要件に反するため使わない）
 import wasmUrl from 'zxing-wasm/reader/zxing_reader.wasm?url'
 import { SUPPORTED_FORMATS } from './types'
-import type { BarcodeHit } from './types'
+import type { BarcodeHit, NormalizedRect } from './types'
 
 // BarcodeDetector 形式（snake_case）から zxing-cpp の正規フォーマット名へ変換する
 const FORMAT_MAP: Record<(typeof SUPPORTED_FORMATS)[number], ReadInputBarcodeFormat> = {
@@ -30,6 +30,33 @@ const REVERSE_FORMAT_MAP = new Map<string, string>(
 )
 
 const ZXING_FORMATS = Object.values(FORMAT_MAP)
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  if (value < 0) return 0
+  if (value > 1) return 1
+  return value
+}
+
+// zxing-cpp の position は4隅の頂点（topLeft/topRight/bottomLeft/bottomRight）を
+// 読み取り対象の画像自身のピクセル座標で返す（zxing-wasm の型定義 position.d.ts の
+// ReadResult.position を参照。回転したバーコードでも矩形とは限らないため、
+// 4点の外接矩形（min/max）を取ってから、画像の幅・高さで正規化する（映像座標）。
+function boxFromPosition(position: Position, imageWidth: number, imageHeight: number): NormalizedRect | undefined {
+  if (!(imageWidth > 0) || !(imageHeight > 0)) return undefined
+  const xs = [position.topLeft.x, position.topRight.x, position.bottomLeft.x, position.bottomRight.x]
+  const ys = [position.topLeft.y, position.topRight.y, position.bottomLeft.y, position.bottomRight.y]
+  const minX = Math.min(...xs)
+  const maxX = Math.max(...xs)
+  const minY = Math.min(...ys)
+  const maxY = Math.max(...ys)
+  return {
+    x: clamp01(minX / imageWidth),
+    y: clamp01(minY / imageHeight),
+    w: Math.max(0, Math.min((maxX - minX) / imageWidth, 1)),
+    h: Math.max(0, Math.min((maxY - minY) / imageHeight, 1)),
+  }
+}
 
 prepareZXingModule({
   overrides: { locateFile: () => wasmUrl },
@@ -81,7 +108,11 @@ async function handleDecode(request: DecodeRequest): Promise<void> {
 
     const hits: BarcodeHit[] = results
       .filter((r) => r.isValid && r.text.length > 0)
-      .map((r) => ({ value: r.text, format: REVERSE_FORMAT_MAP.get(r.format) ?? r.format }))
+      .map((r) => ({
+        value: r.text,
+        format: REVERSE_FORMAT_MAP.get(r.format) ?? r.format,
+        box: boxFromPosition(r.position, imageData.width, imageData.height),
+      }))
 
     post({ type: 'result', id, hits })
   } catch (err) {

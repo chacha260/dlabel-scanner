@@ -1,7 +1,13 @@
 // バーコード読み取りの共通型。ネイティブ実装（BarcodeDetector）と
 // zxing-wasm フォールバック実装の両方がこの形に検出結果を正規化する。
 
-export type BarcodeHit = { value: string; format: string }
+// 検出したバーコードの位置。「渡した画像そのもの」の幅・高さに対する 0..1 の割合
+// （= 映像座標。<video> の表示枠に対する割合である表示座標とは別物）。
+// フレームループが検出に使う画像は 720px 長辺へダウンスケールした映像なので、
+// この割合は元の映像解像度に依存しない（同じ映像座標のまま使い回せる）。
+export type NormalizedRect = { x: number; y: number; w: number; h: number }
+
+export type BarcodeHit = { value: string; format: string; box?: NormalizedRect }
 
 export interface BarcodeReader {
   detect(bitmap: ImageBitmap): Promise<BarcodeHit[]>

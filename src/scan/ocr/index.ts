@@ -2,7 +2,10 @@
 // （フレームループには絶対に組み込まない）。ワーカーはモジュール単位の
 // 遅延シングルトンとして、初回呼び出し時にのみ生成する。
 
+import type { NormalizedRect } from '../barcode/types'
+export type { NormalizedRect } from '../barcode/types'
 import { mapCoverRectToVideo } from './geometry'
+import { boxesToMask } from './mask'
 import { preprocessRoi } from './preprocess'
 import type { OcrOptions, OcrResult, RoiRect } from './types'
 
@@ -11,6 +14,20 @@ export type { OcrOptions, OcrResult, RoiRect } from './types'
 export { computeOcrScale, OCR_PIXEL_BUDGET } from './preprocess'
 export { applyOcrFilter, filterAlnumOnly, filterDigitsOnly, OCR_FILTER_LABELS } from './postprocess'
 export type { OcrFilterMode } from './postprocess'
+export { boxesToMask, DEFAULT_MASK_MARGIN, expandRect, normalizedRectToPixels, rectsOverlap } from './mask'
+export type { PixelRect } from './mask'
+export {
+  clampRoi,
+  DEFAULT_ROI,
+  isValidRoiRect,
+  loadPersistedRoi,
+  MIN_ROI_H,
+  MIN_ROI_W,
+  moveRoi,
+  resizeRoi,
+  savePersistedRoi,
+} from './roi'
+export type { HandleId } from './roi'
 
 // OCR エンジンのダウンロード/初期化/認識の進捗。progress は 0..1、status は日本語の表示文言。
 export type OcrProgress = { status: string; progress: number }
@@ -93,10 +110,11 @@ export async function preloadOcr(onProgress?: (progress: OcrProgress) => void): 
 // 前処理（グレースケール化・スケーリング）まで済ませた ImageData を返すので、
 // 呼び出し側はこれをそのままプレビュー用サムネイルとしても、認識結果の検証用にも使える。
 //
-// roi は「画面に表示している枠」に対する割合で受け取り、ここで映像の実解像度上の
-// 範囲へ変換する。object-fit: cover による切り落としを考慮しないと、
-// 画面の枠と実際に切り出される範囲がずれるため、変換は必ずここを通す。
-export function captureRoi(source: HTMLVideoElement, roi: RoiRect): ImageData {
+// roi は「画面に表示している枠」に対する割合（表示座標）で受け取り、ここで映像の
+// 実解像度上の範囲（映像座標）へ変換する。object-fit: cover による切り落としを
+// 考慮しないと、画面の枠と実際に切り出される範囲がずれるため、変換は必ずここを通す。
+// maskRects を渡す場合は、映像座標（フレーム全体に対する 0..1）で指定すること。
+export function captureRoi(source: HTMLVideoElement, roi: RoiRect, maskRects?: NormalizedRect[]): ImageData {
   const videoRoi = mapCoverRectToVideo(
     roi,
     source.clientWidth,
@@ -104,7 +122,68 @@ export function captureRoi(source: HTMLVideoElement, roi: RoiRect): ImageData {
     source.videoWidth,
     source.videoHeight,
   )
-  return preprocessRoi(source, videoRoi)
+  return preprocessRoi(source, videoRoi, maskRects)
+}
+
+// シャッターを押した「その瞬間」の映像全体を同期的に静止画へ落とし込む。
+// これを OffscreenCanvas として保持しておけば、この後の「バーコード検出」や
+// 「ROI 切り出し」が非同期でどれだけ時間をかけても、実際に処理する画素は
+// 常にシャッター押下時点のもののままになる（撮影後に端末が動いても影響を受けない）。
+export function captureFrame(video: HTMLVideoElement): OffscreenCanvas {
+  const width = Math.max(1, video.videoWidth)
+  const height = Math.max(1, video.videoHeight)
+  const canvas = new OffscreenCanvas(width, height)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) {
+    throw new Error('2D context is not available')
+  }
+  ctx.drawImage(video, 0, 0, width, height)
+  return canvas
+}
+
+// captureFrame() で撮った静止フレームと対にする、ROI の映像座標表現。
+export type CapturedFrame = {
+  frame: OffscreenCanvas
+  /** 表示座標の ROI を、撮影時点の映像座標（0..1）へ変換したもの */
+  videoRoi: RoiRect
+}
+
+// シャッター押下の瞬間に、静止フレームと ROI の映像座標への変換を両方まとめて
+// 同期的に確定させる。表示座標→映像座標の変換にはそのときの video 要素の
+// clientWidth/clientHeight が必要なため、captureFrame と同じタイミングで行う。
+export function captureFrameAndRoi(video: HTMLVideoElement, roi: RoiRect): CapturedFrame {
+  const frame = captureFrame(video)
+  const videoRoi = mapCoverRectToVideo(roi, video.clientWidth, video.clientHeight, video.videoWidth, video.videoHeight)
+  return { frame, videoRoi }
+}
+
+// 既に映像座標になっている ROI で、静止フレーム（または video 本体）から直接切り出す。
+// captureRoi と違い、表示座標→映像座標の変換は行わない
+// （captureFrameAndRoi で変換済みの videoRoi をそのまま使うためのもの）。
+export function cropVideoSpaceRoi(source: HTMLVideoElement | OffscreenCanvas, videoRoi: RoiRect, maskRects?: NormalizedRect[]): ImageData {
+  return preprocessRoi(source, videoRoi, maskRects)
+}
+
+// フレームループが持つバーコードリーダーを再利用して、1枚の静止フレームに対して
+// 1回だけ検出を行う関数の型（useBarcodeScanner の detectBoxes を渡す想定）。
+export type BoxDetector = (frame: OffscreenCanvas) => Promise<NormalizedRect[]>
+
+// captureFrameAndRoi で確定させた静止フレームに対して、バーコード検出→
+// （ROI と重なる枠だけを）マスク→ROI 切り出し、までをまとめて行う。
+// 検出に失敗しても例外を投げず、マスクなしで crop を返す（劣化はするが処理は止めない）。
+export async function captureRoiWithBarcodeMask(
+  captured: CapturedFrame,
+  detectBoxes: BoxDetector,
+): Promise<{ image: ImageData; maskedCount: number; maskRects: NormalizedRect[] }> {
+  let maskRects: NormalizedRect[] = []
+  try {
+    const boxes = await detectBoxes(captured.frame)
+    maskRects = boxesToMask(boxes, captured.videoRoi)
+  } catch {
+    maskRects = []
+  }
+  const image = cropVideoSpaceRoi(captured.frame, captured.videoRoi, maskRects.length > 0 ? maskRects : undefined)
+  return { image, maskedCount: maskRects.length, maskRects }
 }
 
 // captureRoi で得た画像を認識する。同じ ImageData を使い回して

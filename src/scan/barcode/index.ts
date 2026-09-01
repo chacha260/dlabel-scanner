@@ -4,7 +4,7 @@
 import type { BarcodeHit, BarcodeReader } from './types'
 import { createNativeReader, isNativeAvailable } from './native'
 
-export type { BarcodeHit, BarcodeReader } from './types'
+export type { BarcodeHit, BarcodeReader, NormalizedRect } from './types'
 export { SUPPORTED_FORMATS } from './types'
 
 export type BarcodeBackend = 'native' | 'zxing'
