@@ -6,12 +6,12 @@ import type { NormalizedRect } from '../barcode/types'
 export type { NormalizedRect } from '../barcode/types'
 import { mapCoverRectToVideo } from './geometry'
 import { boxesToMask } from './mask'
-import { preprocessRoi } from './preprocess'
+import { preprocessRoi, trimBarcodeBoxesToStripes } from './preprocess'
 import type { OcrOptions, OcrResult, RoiRect } from './types'
 
 export { DEFAULT_OCR_OPTIONS } from './types'
 export type { OcrOptions, OcrResult, RoiRect } from './types'
-export { computeOcrScale, OCR_PIXEL_BUDGET } from './preprocess'
+export { computeOcrScale, OCR_PIXEL_BUDGET, trimBarcodeBoxesToStripes } from './preprocess'
 export { applyOcrFilter, filterAlnumOnly, filterDigitsOnly, OCR_FILTER_LABELS } from './postprocess'
 export type { OcrFilterMode } from './postprocess'
 export { boxesToMask, DEFAULT_MASK_MARGIN, expandRect, normalizedRectToPixels, rectsOverlap } from './mask'
@@ -169,7 +169,8 @@ export function cropVideoSpaceRoi(source: HTMLVideoElement | OffscreenCanvas, vi
 export type BoxDetector = (frame: OffscreenCanvas) => Promise<NormalizedRect[]>
 
 // captureFrameAndRoi で確定させた静止フレームに対して、バーコード検出→
-// （ROI と重なる枠だけを）マスク→ROI 切り出し、までをまとめて行う。
+// （ROI と重なる枠だけを）マスク候補に絞り込み→実ピクセルを見て縞の帯まで
+// 縦方向に縮める→ROI 切り出し、までをまとめて行う。
 // 検出に失敗しても例外を投げず、マスクなしで crop を返す（劣化はするが処理は止めない）。
 export async function captureRoiWithBarcodeMask(
   captured: CapturedFrame,
@@ -178,7 +179,8 @@ export async function captureRoiWithBarcodeMask(
   let maskRects: NormalizedRect[] = []
   try {
     const boxes = await detectBoxes(captured.frame)
-    maskRects = boxesToMask(boxes, captured.videoRoi)
+    const candidates = boxesToMask(boxes, captured.videoRoi)
+    maskRects = trimBarcodeBoxesToStripes(captured.frame, candidates)
   } catch {
     maskRects = []
   }

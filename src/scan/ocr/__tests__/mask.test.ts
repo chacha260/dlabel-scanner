@@ -117,4 +117,14 @@ describe('boxesToMask', () => {
     const masked = boxesToMask([box], roi)
     expect(masked[0].x).toBeCloseTo(box.x - DEFAULT_MASK_MARGIN, 6)
   })
+
+  it('既定のマージンは0であり、検出枠をフレーム全体基準で広げない（隣接する文字を巻き込まないため）', () => {
+    expect(DEFAULT_MASK_MARGIN).toBe(0)
+    const box = { x: 0.2, y: 0.3, w: 0.1, h: 0.05 }
+    const masked = boxesToMask([box], roi)
+    expect(masked[0].x).toBeCloseTo(box.x, 9)
+    expect(masked[0].y).toBeCloseTo(box.y, 9)
+    expect(masked[0].w).toBeCloseTo(box.w, 9)
+    expect(masked[0].h).toBeCloseTo(box.h, 9)
+  })
 })

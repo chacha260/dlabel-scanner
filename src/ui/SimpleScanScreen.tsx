@@ -30,6 +30,7 @@ import {
   recognizeCaptured,
   resizeRoi,
   savePersistedRoi,
+  trimBarcodeBoxesToStripes,
   type HandleId,
   type OcrFilterMode,
   type OcrOptions,
@@ -339,7 +340,11 @@ export function SimpleScanScreen() {
     // detectBoxes は失敗しても例外を投げず空配列を返す設計なので、ここでは
     // マスクなしで続行するフォールバックだけ考えればよい。
     void detectBoxes(captured.frame).then((boxes) => {
-      const maskRects = boxesToMask(boxes, captured.videoRoi)
+      const candidates = boxesToMask(boxes, captured.videoRoi)
+      // 検出枠は「縞がありそうな領域」の候補にすぎないため、実ピクセルを見て
+      // 縞が密集している行の帯まで縦方向に縮めてから塗りつぶしに使う
+      // （隣接する文字まで一緒に塗りつぶしてしまうのを防ぐため）。
+      const maskRects = trimBarcodeBoxesToStripes(captured.frame, candidates)
       capturedFrameRef.current = { frame: captured.frame, videoRoi: captured.videoRoi, maskRects }
       const useMask = autoMaskEnabled && maskRects.length > 0
       const image = cropVideoSpaceRoi(captured.frame, captured.videoRoi, useMask ? maskRects : undefined)

@@ -11,8 +11,16 @@ import type { NormalizedRect } from '../barcode/types'
 export type PixelRect = { x: number; y: number; w: number; h: number }
 
 // バーコード検出枠を広げる既定のマージン（フレーム全体に対する割合）。
-// 縞の端がわずかにはみ出して残ることでノイズになるのを防ぐ。
-export const DEFAULT_MASK_MARGIN = 0.02
+//
+// 以前は 0.02（フレーム全体の2%）を既定にしていたが、1080px 高のフレームでは
+// 上下左右 約21px も広げることになり、バーコードのすぐ隣に印字された文字
+// （縞との隙間はそれよりずっと狭いことが多い）まで塗りつぶしてしまっていた。
+// BarcodeDetector の boundingBox には元々クワイエットゾーン分の余白が
+// 含まれているため、これ以上フレーム全体基準で広げる必要はない。
+// 縞の実際の位置への追い込みは stripes.ts 側（実ピクセルを見て縦方向にのみ
+// 縮める）で行うため、ここでの既定マージンは 0 とする。
+// expandRect 自体はテスト済みで他用途にも使えるため残すが、既定経路では使わない。
+export const DEFAULT_MASK_MARGIN = 0
 
 function clamp01(value: number): number {
   if (!Number.isFinite(value)) return 0
