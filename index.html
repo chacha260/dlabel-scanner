@@ -2,6 +2,30 @@
 <html lang="ja">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      外部との通信を完全に遮断する。設定漏れがあってもブラウザ側で強制されるため、
+      「同梱ファイルを指定しているから外に出ない」という設定頼みの状態から、
+      「そもそも出られない」状態にできる。
+      - connect-src 'self' : fetch / XHR / WebSocket を同一オリジンに限定
+      - wasm-unsafe-eval   : zxing / tesseract の WebAssembly コンパイルに必要
+      - style-src の unsafe-inline : React の style={{}}（インラインstyle属性）に必要
+      - mediastream:       : カメラ映像を <video> に割り当てるため
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self';
+               script-src 'self' 'wasm-unsafe-eval' blob:;
+               worker-src 'self' blob:;
+               style-src 'self' 'unsafe-inline';
+               img-src 'self' data: blob:;
+               media-src 'self' blob: mediastream:;
+               font-src 'self';
+               connect-src 'self';
+               manifest-src 'self';
+               object-src 'none';
+               base-uri 'self';
+               form-action 'none'"
+    />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
