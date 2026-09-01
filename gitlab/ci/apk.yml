@@ -1,0 +1,54 @@
+# Android APK のビルド。GitHub Actions の apk.yml に対応する。
+#
+# 手動実行、または v で始まるタグで動く。
+# Android SDK（約1GB）を Google から取得するため、Runner が外部に出られる必要がある。
+# 社内網に閉じた Runner で動かす場合は gitlab/docs/self-hosted.md を参照。
+
+apk:
+  stage: build
+  needs: [verify]
+  image: eclipse-temurin:21-jdk
+  variables:
+    ANDROID_HOME: "$CI_PROJECT_DIR/.android-sdk"
+    ANDROID_SDK_ROOT: "$CI_PROJECT_DIR/.android-sdk"
+    # android/variables.gradle の compileSdkVersion / targetSdkVersion に合わせる
+    ANDROID_PLATFORM: "36"
+    ANDROID_BUILD_TOOLS: "36.0.0"
+  before_script:
+    # このジョブだけ JDK イメージを使うため、Node と pnpm を個別に用意する
+    - apt-get update -qq && apt-get install -y -qq curl unzip git
+    - curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y -qq nodejs
+    - corepack enable && corepack prepare "pnpm@$PNPM_VERSION" --activate
+    - pnpm install --frozen-lockfile
+    - |
+      if [ ! -d "$ANDROID_HOME/platforms/android-$ANDROID_PLATFORM" ]; then
+        echo "Android SDK を取得します（初回のみ。以降はキャッシュを使います）"
+        mkdir -p "$ANDROID_HOME/cmdline-tools"
+        curl -fsSL -o /tmp/tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+        unzip -q /tmp/tools.zip -d "$ANDROID_HOME/cmdline-tools"
+        mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+        yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+        "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+          "platform-tools" \
+          "platforms;android-$ANDROID_PLATFORM" \
+          "build-tools;$ANDROID_BUILD_TOOLS" > /dev/null
+      fi
+  script:
+    # PACKAGED=1 のビルド（Service Worker なし）+ cap sync
+    - pnpm run build:apk
+    - cd android && ./gradlew assembleDebug --no-daemon
+    - ls -lh app/build/outputs/apk/debug/*.apk
+  cache:
+    key: "android-sdk-$ANDROID_PLATFORM"
+    paths:
+      - .android-sdk
+      - .gradle
+  artifacts:
+    name: "dlabel-scanner-debug-apk"
+    paths:
+      - android/app/build/outputs/apk/debug/*.apk
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - when: manual
+      allow_failure: true

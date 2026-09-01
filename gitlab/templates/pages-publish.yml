@@ -1,0 +1,22 @@
+# GitLab 17.9 以降で使える pages ジョブ。
+# pages.publish で配信ディレクトリを直接指定できるため、
+# public/ への置き換えが不要になる。
+#
+# 使い方: .gitlab-ci.yml の include で
+#   - local: gitlab/ci/pages.yml
+# を
+#   - local: gitlab/templates/pages-publish.yml
+# に差し替える。
+
+pages:
+  stage: deploy
+  needs: [build]
+  script:
+    - echo "dist をそのまま配信します"
+  pages:
+    publish: dist
+  artifacts:
+    paths:
+      - dist
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

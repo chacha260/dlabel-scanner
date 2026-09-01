@@ -1,0 +1,27 @@
+# 全ジョブ共通の設定。ステージ順序と Node/pnpm の準備をここに集約する。
+
+stages:
+  - verify
+  - build
+  - deploy
+
+variables:
+  # pnpm のストアを CI_PROJECT_DIR 配下に置く。
+  # GitLab のキャッシュはプロジェクトディレクトリ内しか対象にできないため。
+  PNPM_HOME: "$CI_PROJECT_DIR/.pnpm-store"
+  NODE_VERSION: "24"
+  PNPM_VERSION: "10.33.0"
+
+# Node 系ジョブが継承する土台。APK ジョブは JDK イメージを使うため継承しない。
+.node-job:
+  image: node:24
+  before_script:
+    - corepack enable
+    - corepack prepare "pnpm@$PNPM_VERSION" --activate
+    - pnpm install --frozen-lockfile
+  cache:
+    key:
+      files:
+        - pnpm-lock.yaml
+    paths:
+      - .pnpm-store

@@ -68,4 +68,5 @@ Android APK 化したビルドも用意しています（`android/` ディレク
 
 GitHub Actions と同じ内容を `.gitlab-ci.yml` に用意しています。
 社内 GitLab に移せば配信・CI・ソースがすべて社内で完結します。
-注意点は [`docs/gitlab.md`](docs/gitlab.md) を参照してください。
+定義とドキュメントは [`gitlab/`](gitlab/) にまとめてあります。
+社内 GitLab で動かす前の確認事項は [`gitlab/docs/self-hosted.md`](gitlab/docs/self-hosted.md) を参照してください。

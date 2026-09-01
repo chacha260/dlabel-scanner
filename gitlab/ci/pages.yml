@@ -1,0 +1,21 @@
+# GitLab Pages への配信。GitHub Actions の ci.yml の deploy ジョブに対応する。
+#
+# GitLab Pages は成果物が public/ にあることを前提とする。
+# このリポジトリには Vite の入力用 public/（OCRエンジンを含む）が既にあるため、
+# ビルド結果に置き換える。置き換わるのは CI の作業コピーのみで、
+# リポジトリのファイルには影響しない。
+#
+# GitLab 17.9 以降なら pages.publish が使えるため、この置き換えは不要になる。
+# gitlab/templates/pages-publish.yml を参照。
+
+pages:
+  stage: deploy
+  needs: [build]
+  script:
+    - rm -rf public
+    - mv dist public
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

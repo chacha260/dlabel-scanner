@@ -1,0 +1,9 @@
+# 型チェック・Lint・テスト。GitHub Actions の ci.yml の verify ジョブに対応する。
+
+verify:
+  extends: .node-job
+  stage: verify
+  script:
+    - pnpm exec tsc -b --force
+    - pnpm lint
+    - pnpm test

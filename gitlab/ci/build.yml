@@ -1,0 +1,26 @@
+# ビルドと Service Worker の検査。GitHub Actions の ci.yml の build ジョブに対応する。
+
+build:
+  extends: .node-job
+  stage: build
+  needs: [verify]
+  script:
+    # GitLab Pages はサブパス配信になるため、CI_PAGES_URL からパス部分を取り出して base に渡す。
+    # プロジェクト名やグループ構成が変わっても、この定義を直す必要はない。
+    - |
+      RAW_PATH="$(printf '%s' "${CI_PAGES_URL:-}" | sed -E 's#^https?://[^/]*##')"
+      export BASE_PATH="$(printf '%s/' "$RAW_PATH" | sed -E 's#//+#/#g')"
+      echo "BASE_PATH=$BASE_PATH"
+    - pnpm build
+    # OCRエンジン(約16MB)がプリキャッシュに混入すると初回インストールが重くなる。
+    # 設定を1行変えるだけで起きうる事故のため、ここで止める。
+    - |
+      if grep -o 'precacheAndRoute(\[[^]]*\]' dist/sw.js | grep -q 'vendor'; then
+        echo "OCRエンジンがプリキャッシュに含まれています"; exit 1
+      fi
+      echo "OK: プリキャッシュに vendor は含まれていません"
+    - du -h dist/assets/* | sort -h
+  artifacts:
+    paths:
+      - dist
+    expire_in: 1 week
