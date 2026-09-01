@@ -56,3 +56,10 @@ pnpm lint       # oxlint
 ```
 
 カメラ・バーコード検出は HTTPS（または localhost）が必要です。OCRエンジン（tesseract.js、約9MB）は初回利用時にのみダウンロードし、Service Worker のキャッシュ（`vendor/**`）によって以降はオフラインで動作します。
+
+## Android APK 版
+
+ホスティング元を一切介さず端末内だけで完結させたい場合向けに、Capacitor で
+Android APK 化したビルドも用意しています（`android/` ディレクトリ、
+`pnpm build:apk`、`.github/workflows/apk.yml`）。ビルド方法・インストール方法・
+実機で確認すべき事項は [`docs/apk.md`](docs/apk.md) を参照してください。

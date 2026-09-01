@@ -1,0 +1,8 @@
+{
+  "appId": "jp.local.dlabelscanner",
+  "appName": "Dラベル スキャナ",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false
+  }
+}

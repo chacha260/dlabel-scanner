@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
+            android:name=".MainActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+        </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"></meta-data>
+        </provider>
+    </application>
+
+    <!--
+      権限について:
+      - CAMERA: バーコード/OCRスキャンに必須（getUserMedia の許可ダイアログの表示に必要）。
+      - カメラ機能自体は必須（android:required="true"）。バーコード・OCRスキャナ
+        アプリとしてカメラの無い端末では動作しないため、Google Play 等の配布時に
+        カメラ非搭載端末へは表示されないようにする意図もある。
+      - INTERNET 権限は意図的に付与していない。この APK は GitHub Pages 版と異なり
+        アセット一式（HTML/JS/CSS/wasm/OCRエンジン/アイコン）をすべて同梱しており、
+        Capacitor の WebView はそれらをネットワーク経由ではなく
+        WebViewLocalServer#shouldInterceptRequest 経由でローカルに配信する
+        （node_modules/@capacitor/android の capacitor モジュール本体・
+        capacitor-cordova-android-plugins のどちらの AndroidManifest.xml にも
+        パーミッション宣言は存在しない）。CapacitorHttp 等のネットワーク系プラグイン
+        も未使用・未導入であるため、INTERNET が無くてもブリッジは正常に動作する。
+        「外部と通信できない」ことを OS レベルで保証する、プライバシー要件の
+        最も強い裏付けとしてこのままにする。
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="true" />
+</manifest>

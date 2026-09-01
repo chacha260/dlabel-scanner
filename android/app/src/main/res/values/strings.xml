@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Dラベル スキャナ</string>
+    <string name="title_activity_main">Dラベル スキャナ</string>
+    <string name="package_name">jp.local.dlabelscanner</string>
+    <string name="custom_url_scheme">jp.local.dlabelscanner</string>
+</resources>

@@ -1,0 +1,77 @@
+name: APK ビルド
+
+# 手動実行（workflow_dispatch）と v* タグ push のときに Android APK をビルドする。
+# このワークフローは .github/workflows/ci.yml（Web版のテスト・GitHub Pages
+# デプロイ）とは完全に独立しており、ci.yml の挙動には一切影響しない。
+#
+# このマシン（開発環境）には Java も Android SDK も入っておらず、sudo も使えない
+# ため、APK のビルドは常にこの GitHub Actions ランナー上（Java・Android SDK が
+# 事前に入っている ubuntu-latest イメージ）で行う。ローカルで ./gradlew を
+# 実行することはない。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-apk:
+    name: Android APK ビルド（デバッグ署名）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: 依存インストール
+        run: pnpm install --frozen-lockfile
+
+      # 型チェック・Lint・テストは ci.yml の verify ジョブで既に検証されている前提だが、
+      # タグ push など verify を経由しない起動経路もあるため、ここでも最低限
+      # ビルドが通ることを確認する（ビルド自体が失敗すれば以降のジョブは動かない）。
+      - name: APK 用ビルド（Service Worker なし）＋ Capacitor 同期
+        run: pnpm run build:apk
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: デバッグ APK をビルド
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+      - name: APK パスを特定
+        id: apk
+        run: |
+          APK_PATH=$(find android/app/build/outputs/apk/debug -name '*.apk' | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::APK が見つかりませんでした"
+            exit 1
+          fi
+          echo "path=$APK_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: APK サイズをジョブサマリーに表示
+        run: |
+          echo "### APK 情報" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -lh "${{ steps.apk.outputs.path }}" >> "$GITHUB_STEP_SUMMARY"
+          du -h "${{ steps.apk.outputs.path }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**注意**: これはデバッグ署名の APK です。サイドロード（提供元不明のアプリとしてのインストール）による社内配布向けであり、Google Play への公開にはリリース用キーストアで署名し直す必要があります。" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: APK をアップロード
+        uses: actions/upload-artifact@v4
+        with:
+          name: dlabel-scanner-debug-apk
+          path: ${{ steps.apk.outputs.path }}
+          retention-days: 30
+          if-no-files-found: error
