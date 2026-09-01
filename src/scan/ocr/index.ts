@@ -2,6 +2,7 @@
 // （フレームループには絶対に組み込まない）。ワーカーはモジュール単位の
 // 遅延シングルトンとして、初回呼び出し時にのみ生成する。
 
+import { mapCoverRectToVideo } from './geometry'
 import { preprocessRoi } from './preprocess'
 import type { OcrOptions, OcrResult, RoiRect } from './types'
 
@@ -89,10 +90,21 @@ export async function preloadOcr(onProgress?: (progress: OcrProgress) => void): 
 }
 
 // 「今まさに OCR にかけようとしている画像」をシャッター押下の瞬間に同期的に確定させる。
-// 前処理（グレースケール化・二値化・スケーリング）まで済ませた ImageData を返すので、
+// 前処理（グレースケール化・スケーリング）まで済ませた ImageData を返すので、
 // 呼び出し側はこれをそのままプレビュー用サムネイルとしても、認識結果の検証用にも使える。
+//
+// roi は「画面に表示している枠」に対する割合で受け取り、ここで映像の実解像度上の
+// 範囲へ変換する。object-fit: cover による切り落としを考慮しないと、
+// 画面の枠と実際に切り出される範囲がずれるため、変換は必ずここを通す。
 export function captureRoi(source: HTMLVideoElement, roi: RoiRect): ImageData {
-  return preprocessRoi(source, roi)
+  const videoRoi = mapCoverRectToVideo(
+    roi,
+    source.clientWidth,
+    source.clientHeight,
+    source.videoWidth,
+    source.videoHeight,
+  )
+  return preprocessRoi(source, videoRoi)
 }
 
 // captureRoi で得た画像を認識する。同じ ImageData を使い回して
