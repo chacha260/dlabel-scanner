@@ -3,6 +3,7 @@
 
 import type { CaptureQuality } from '../camera/quality'
 import type { ScanMode } from '../scan/scanGating'
+import { DEFAULT_TRIM_RULES, type TrimRules } from '../scan/barcode/trim'
 
 const SCAN_MODE_STORAGE_KEY = 'dlabel.scanMode'
 
@@ -142,6 +143,51 @@ export function loadCaptureQuality(): CaptureQuality {
 export function saveCaptureQuality(value: CaptureQuality): void {
   try {
     localStorage.setItem(CAPTURE_QUALITY_STORAGE_KEY, value)
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
+
+const TRIM_RULES_STORAGE_KEY = 'dlabel.trimRules'
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+}
+
+// 保存値の形を信用せず、TrimRules として妥当な形かどうかを1フィールドずつ確かめる
+// （localStorage の値は他バージョンのアプリや手動編集で壊れている可能性があるため）。
+function isValidTrimRules(value: unknown): value is TrimRules {
+  if (value === null || typeof value !== 'object') return false
+  const v = value as Record<string, unknown>
+  return (
+    typeof v.enabled === 'boolean' &&
+    isStringArray(v.stripPrefixes) &&
+    isStringArray(v.stripSuffixes) &&
+    typeof v.cutFrom === 'string' &&
+    typeof v.cutUpTo === 'string' &&
+    typeof v.trimWhitespace === 'boolean'
+  )
+}
+
+/**
+ * バーコード値の整形（トリミング）ルール。保存値が無い・壊れている場合は
+ * DEFAULT_TRIM_RULES（＝OFF）にフォールバックする。
+ */
+export function loadTrimRules(): TrimRules {
+  try {
+    const raw = localStorage.getItem(TRIM_RULES_STORAGE_KEY)
+    if (raw === null) return DEFAULT_TRIM_RULES
+    const parsed: unknown = JSON.parse(raw)
+    return isValidTrimRules(parsed) ? parsed : DEFAULT_TRIM_RULES
+  } catch {
+    // プライベートブラウジング等で読めない・壊れている場合は既定値（OFF）で動作させる
+    return DEFAULT_TRIM_RULES
+  }
+}
+
+export function saveTrimRules(rules: TrimRules): void {
+  try {
+    localStorage.setItem(TRIM_RULES_STORAGE_KEY, JSON.stringify(rules))
   } catch {
     // 保存できなくても致命的ではないため無視する
   }

@@ -25,6 +25,8 @@ export type OverlayFlags = {
   draftBannerOpen?: boolean
   /** 使い方（ヘルプ）パネルを全画面表示している状態 */
   helpOpen?: boolean
+  /** バーコード値の整形（トリミング）ルール設定パネルを全画面表示している状態 */
+  trimPanelOpen?: boolean
 }
 
 /** いずれかのオーバーレイが開いているか */
@@ -37,7 +39,8 @@ export function isAnyOverlayOpen(flags: OverlayFlags): boolean {
     (flags.forceConfirmOpen ?? false) ||
     (flags.clearConfirmOpen ?? false) ||
     (flags.draftBannerOpen ?? false) ||
-    (flags.helpOpen ?? false)
+    (flags.helpOpen ?? false) ||
+    (flags.trimPanelOpen ?? false)
   )
 }
 

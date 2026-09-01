@@ -11,6 +11,7 @@ function allClosed(): OverlayFlags {
     clearConfirmOpen: false,
     draftBannerOpen: false,
     helpOpen: false,
+    trimPanelOpen: false,
   }
 }
 
@@ -28,6 +29,7 @@ describe('isAnyOverlayOpen', () => {
     'clearConfirmOpen',
     'draftBannerOpen',
     'helpOpen',
+    'trimPanelOpen',
   ]
 
   for (const key of overlayKeys) {
@@ -114,6 +116,32 @@ describe('helpOpen（使い方パネル）と isBarcodeScanEnabled の組み合�
 
   it('手動一時停止中はヘルプを閉じても検出は再開しない', () => {
     const overlaysOpen = isAnyOverlayOpen({ helpOpen: false })
+    expect(isBarcodeScanEnabled({ ...baseInputs, manualPaused: true, overlaysOpen })).toBe(false)
+  })
+})
+
+describe('trimPanelOpen（整形パネル）と isBarcodeScanEnabled の組み合わせ', () => {
+  const baseInputs = {
+    tabActive: true,
+    cameraReady: true,
+    pageVisible: true,
+    manualPaused: false,
+    overlaysOpen: false,
+    mode: 'barcode' as const,
+  }
+
+  it('整形パネルを開くとバーコード検出が無効になる', () => {
+    const overlaysOpen = isAnyOverlayOpen({ trimPanelOpen: true })
+    expect(isBarcodeScanEnabled({ ...baseInputs, overlaysOpen })).toBe(false)
+  })
+
+  it('整形パネルを閉じると検出が再開する（手動一時停止でない場合）', () => {
+    const overlaysOpen = isAnyOverlayOpen({ trimPanelOpen: false })
+    expect(isBarcodeScanEnabled({ ...baseInputs, overlaysOpen })).toBe(true)
+  })
+
+  it('手動一時停止中は整形パネルを閉じても検出は再開しない', () => {
+    const overlaysOpen = isAnyOverlayOpen({ trimPanelOpen: false })
     expect(isBarcodeScanEnabled({ ...baseInputs, manualPaused: true, overlaysOpen })).toBe(false)
   })
 })

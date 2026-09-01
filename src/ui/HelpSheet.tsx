@@ -162,6 +162,67 @@ export default function HelpSheet({ onClose }: HelpSheetProps) {
           </ul>
         </Section>
 
+        <Section title="バーコード値の整形（トリミング）">
+          <p>
+            バーコードモードの
+            <ButtonRef>整形</ButtonRef>
+            を押すと、読み取ったバーコードの値から不要な部分を取り除く設定を開けます。
+            <strong className="text-slate-100">バーコードだけに適用され、文字（OCR）モードの結果には一切影響しません。</strong>
+          </p>
+          <p>設定できるルールは次の5種類で、この順番でまとめて適用されます。</p>
+          <ul className="list-disc space-y-1.5 pl-5">
+            <li>指定した文字列が最初に現れた位置までを捨てる（それより後ろを残す）</li>
+            <li>指定した文字列が最初に現れた位置以降をすべて捨てる（スペースなどの区切り文字を指定するのに便利）</li>
+            <li>前方一致する接頭辞を取り除く（複数指定できます）</li>
+            <li>後方一致する接尾辞を取り除く（複数指定できます）</li>
+            <li>最後に前後の空白を除去する</li>
+          </ul>
+          <p>
+            パネルを開いた状態ではバーコードの自動読み取りは止まり、上部の
+            <strong className="text-slate-100">プレビュー欄</strong>
+            で今のルールを適用した結果をその場で確認できます（一覧にある直近のバーコード値が初期値として入ります）。
+          </p>
+          <p>
+            整形された値だけが一覧・全部コピー・各行のコピーに使われます。
+            元の読み取り値も保持しており、整形によって値が変わったときだけ、その行の下に小さく
+            <strong className="text-slate-100">「元の読み取り: 〜」</strong>
+            として表示します。
+            <strong className="text-amber-300">ルールを適用した結果が空文字になってしまう場合は、読み取りを無駄にしないよう元の値をそのまま使います。</strong>
+          </p>
+          <p>
+            <strong className="text-slate-100">「読み取り済み」の判定（重複チェック）も、整形した後の値で行います。</strong>
+            整形前の値が違っても、整形後の値が一致すれば同じバーコードとして扱われます。
+          </p>
+          <div className="flex gap-2.5 rounded-lg border border-slate-600 bg-slate-800/60 p-3.5">
+            <p className="leading-relaxed">
+              <strong className="text-cyan-200">GS（区切り文字）について:</strong>
+              一部のバーコード（GS1-128など）は、複数の情報を1本の値に連結して持っており、その区切りに
+              <span className="mx-1 font-mono text-slate-100">GS</span>
+              という目に見えない制御文字（コード
+              <span className="mx-1 font-mono text-slate-100">0x1D</span>
+              ）を使います。実際のバーコードの中に
+              <span className="mx-1 font-mono text-slate-100">(01)</span>
+              のような丸カッコが入っていることはありません（カッコは印字ラベル等での人間向けの表記だけで、
+              バーコード自体には数字とこのGS区切りしか入っていません）。
+              整形の
+              <span className="mx-1 font-mono text-slate-100">cutFrom</span>
+              欄に
+              <span className="mx-1 font-mono text-slate-100">\x1D</span>
+              （またはエイリアスの
+              <span className="mx-1 font-mono text-slate-100">\GS</span>
+              ）と入力するか、
+              <ButtonRef>GS(0x1D)以降を削除</ButtonRef>
+              ボタンを押すと、GSより後ろをまとめて捨てられます。
+              同様にタブ・改行も
+              <span className="mx-1 font-mono text-slate-100">\t</span>
+              <span className="mx-1 font-mono text-slate-100">\n</span>
+              と入力できます。一覧やプレビューでは、こうした目に見えない文字を
+              <span className="mx-1 font-mono text-slate-100">␝</span>
+              のような記号にして見えるようにしています（実際の値そのものは変わりません）。
+            </p>
+          </div>
+        </Section>
+
         <Section title="文字モード（OCR）">
           <p>
             <ButtonRef tone="primary">文字</ButtonRef>

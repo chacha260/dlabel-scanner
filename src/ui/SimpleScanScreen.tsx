@@ -23,18 +23,21 @@ import { useCamera } from '../camera/useCamera'
 import { resolveZoomValue } from '../camera/zoom'
 import { useBarcodeScanner } from '../scan/useBarcodeScanner'
 import { isAnyOverlayOpen, isBarcodeScanEnabled, type ScanMode } from '../scan/scanGating'
+import { applyTrimRules, visualizeControlChars, type TrimRules } from '../scan/barcode/trim'
 import {
   loadCaptureQuality,
   loadHelpSeen,
   loadRestrictToRoi,
   loadScanMode,
   loadSoundEnabled,
+  loadTrimRules,
   loadZoom,
   markHelpSeen,
   saveCaptureQuality,
   saveRestrictToRoi,
   saveScanMode,
   saveSoundEnabled,
+  saveTrimRules,
   saveZoom,
 } from './prefs'
 import {
@@ -70,6 +73,10 @@ import { copyToClipboard, sourceBadgeClass, sourceBadgeLabel } from './lib'
 // 使い方（ヘルプ）パネルはエントリーチャンクを太らせないよう別チャンクにする
 // （初回表示までに読み込めていればよく、常に即必要というわけではないため）。
 const HelpSheet = lazy(() => import('./HelpSheet'))
+
+// 整形パネルも同じ理由で別チャンクにする（バーコードモードで「整形」ボタンを
+// 押すまでは読み込まれない）。
+const TrimPanel = lazy(() => import('./TrimPanel'))
 
 // 「読み取り済み」通知の連打防止だけに使う短い時間窓（ミリ秒）。追加の可否
 // （＝一覧に同じ値が既にあるか）には一切関与しない。バーコード検出時の
@@ -120,15 +127,22 @@ const FILTER_OPTIONS: { value: OcrFilterMode; label: string }[] = [
 type ResultItem = {
   id: number
   source: 'barcode' | 'ocr'
-  raw: string // OCRの場合は「エンジンが実際に読んだ生テキスト」。フィルタは表示時に適用する
+  raw: string // 元の読み取り値そのもの（バーコード: デコーダの生の値 / OCR: エンジンが実際に読んだ生テキスト）
+  // 表示・コピー・重複判定に使う値。
+  // バーコード: 読み取りを受け付けた瞬間の整形ルールを適用した結果（空文字になる場合は raw と同じ）。
+  //             ルールは後から変えても過去の結果には遡って効かない（スキャン時点で確定させる）。
+  // OCR: raw と同じ値を入れておく（フィルタは filterMode の切り替えに追従させたいため、
+  //      ここでは適用せず displayValueOf 側で都度計算する）。
+  value: string
   format?: string
   at: number
 }
 
 // 表示用の値を求める。OCR結果だけ抽出フィルタの対象になる
-// （フィルタはここで毎回計算するだけの純粋処理なので、切り替えは即座に反映される）
+// （フィルタはここで毎回計算するだけの純粋処理なので、切り替えは即座に反映される）。
+// バーコードは整形済みの value をそのまま返す（フィルタのように毎回計算し直すものではない）。
 function displayValueOf(item: ResultItem, filterMode: OcrFilterMode): string {
-  if (item.source !== 'ocr') return item.raw
+  if (item.source !== 'ocr') return item.value
   return applyOcrFilter(item.raw, filterMode)
 }
 
@@ -172,12 +186,34 @@ export function SimpleScanScreen() {
   useEffect(() => {
     resultsRef.current = results
   }, [results])
+  // バーコード値の整形（トリミング）ルール。前回設定していた内容を次回起動時も復元する。
+  // trimRulesRef はフレームループ（isDuplicateValue・handleScan）から最新値を読むためのもの
+  // （state を直接依存配列に入れると、ルールを変えるたびにフレームループ側の再構築が起きるため）。
+  const [trimRules, setTrimRules] = useState<TrimRules>(loadTrimRules)
+  const trimRulesRef = useRef(trimRules)
+  useEffect(() => {
+    trimRulesRef.current = trimRules
+  }, [trimRules])
+  const handleChangeTrimRules = useCallback((next: TrimRules) => {
+    setTrimRules(next)
+    saveTrimRules(next)
+  }, [])
+
+  // 整形パネル。バーコード値の整形ルールを編集する全画面パネルで、使い方パネルと同様、
+  // 開いている間はカメラがどこを向いているか分からなくなるため isAnyOverlayOpen 経由で
+  // バーコード検出を止める（下の overlaysOpen を参照）。
+  const [trimPanelOpen, setTrimPanelOpen] = useState(false)
+  const handleOpenTrimPanel = useCallback(() => setTrimPanelOpen(true), [])
+  const handleCloseTrimPanel = useCallback(() => setTrimPanelOpen(false), [])
+
   // 対象はバーコード行のみ。OCR で読んだ文字列がたまたま同じ値でも、
   // バーコードの読み取りを止める理由にはならないため。
-  const isDuplicateValue = useCallback(
-    (value: string) => resultsRef.current.some((item) => item.source === 'barcode' && item.raw === value),
-    [],
-  )
+  // 重複判定は「整形後の値」で比較する（一覧に残っているのは整形後の値であり、
+  // それがこのアプリにとっての“意味のある識別子”のため）。
+  const isDuplicateValue = useCallback((value: string) => {
+    const trimmed = applyTrimRules(value, trimRulesRef.current)
+    return resultsRef.current.some((item) => item.source === 'barcode' && item.value === trimmed)
+  }, [])
 
   const [manualPaused, setManualPaused] = useState(false)
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState === 'visible')
@@ -305,9 +341,9 @@ export function SimpleScanScreen() {
   const handleOpenHelp = useCallback(() => setHelpOpen(true), [])
   const handleCloseHelp = useCallback(() => setHelpOpen(false), [])
 
-  const appendResult = useCallback((source: ResultItem['source'], raw: string, format?: string) => {
+  const appendResult = useCallback((source: ResultItem['source'], raw: string, value: string, format?: string) => {
     const id = nextIdRef.current++
-    const item: ResultItem = { id, source, raw, format, at: Date.now() }
+    const item: ResultItem = { id, source, raw, value, format, at: Date.now() }
     // ref を state の反映（effect）まで待たずにここで更新する。
     // 待つと、その間に届いたフレームで同じ値が二重に追加され得るため。
     resultsRef.current = [item, ...resultsRef.current]
@@ -316,7 +352,10 @@ export function SimpleScanScreen() {
 
   const handleScan = useCallback(
     (scan: RawScan) => {
-      appendResult('barcode', scan.value, scan.format)
+      // 整形ルールは「読み取りを受け付けた瞬間」に確定させ、一覧には整形後の値を積む
+      // （ルールを後から変えても、既に一覧にある行には遡って効かない）。
+      const trimmed = applyTrimRules(scan.value, trimRulesRef.current)
+      appendResult('barcode', scan.value, trimmed, scan.format)
     },
     [appendResult],
   )
@@ -344,15 +383,18 @@ export function SimpleScanScreen() {
     else barcodeBox.reset()
   }, [mode, ocrBox, barcodeBox])
 
-  // この画面に実在するオーバーレイは「OCR結果カード」と「使い方パネル」の2つだけ
-  // （一覧・確認ダイアログ・プロファイル選択などはこの画面には存在しない）。
+  // この画面に実在するオーバーレイは「OCR結果カード」「使い方パネル」「整形パネル」の
+  // 3つだけ（一覧・確認ダイアログ・プロファイル選択などはこの画面には存在しない）。
   // isAnyOverlayOpen は汎用の純粋関数のまま流用し、渡すフラグだけを実在するものに絞る。
   // OCR結果カードで止めるのは「認識処理中」だけにする。結果カードはカメラ映像の下に
   // 並ぶだけで視界を塞がないため、表示されている間ずっと検出を止めると
   // 一度 OCR しただけでバーコードが読めなくなってしまう。
-  // 使い方パネルは全画面表示でカメラがどこを向いているか分からなくなるため、
-  // 開いている間は常にバーコード検出を止める。
-  const overlaysOpen = useMemo(() => isAnyOverlayOpen({ ocrResultPanelOpen: ocrBusy, helpOpen }), [ocrBusy, helpOpen])
+  // 使い方パネル・整形パネルはどちらも全画面表示でカメラがどこを向いているか
+  // 分からなくなるため、開いている間は常にバーコード検出を止める。
+  const overlaysOpen = useMemo(
+    () => isAnyOverlayOpen({ ocrResultPanelOpen: ocrBusy, helpOpen, trimPanelOpen }),
+    [ocrBusy, helpOpen, trimPanelOpen],
+  )
 
   // バーコード検出を有効にすべきかは isBarcodeScanEnabled（純粋関数）だけで判定する。
   // 文字（OCR）モードでは、他の条件が何であれ常に無効になる
@@ -410,7 +452,7 @@ export function SimpleScanScreen() {
           if (result.text.trim().length === 0) {
             showToast('文字を読み取れませんでした', 'error')
           } else {
-            appendResult('ocr', result.text)
+            appendResult('ocr', result.text, result.text)
           }
         })
         .catch(() => showToast('OCRに失敗しました', 'error'))
@@ -858,6 +900,18 @@ export function SimpleScanScreen() {
               >
                 {soundEnabled ? <SoundOnIcon className="h-5 w-5" /> : <SoundOffIcon className="h-5 w-5" />}
               </button>
+
+              <button
+                type="button"
+                onClick={handleOpenTrimPanel}
+                aria-label="バーコード値の整形ルールを設定する"
+                aria-pressed={trimRules.enabled}
+                className={`flex min-h-14 items-center justify-center rounded-xl px-3 text-[11px] font-bold ${
+                  trimRules.enabled ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-400'
+                }`}
+              >
+                整形
+              </button>
             </>
           )}
 
@@ -897,7 +951,14 @@ export function SimpleScanScreen() {
           <ul className="divide-y divide-slate-800">
             {results.map((item) => {
               const value = displayValueOf(item, filterMode)
-              const showRaw = item.source === 'ocr' && value !== item.raw
+              // 表示された値が元の読み取り値と違うときだけ、その下に元の値を小さく添える
+              // （OCR: フィルタで絞り込んだとき / バーコード: 整形ルールで削られたとき）。
+              const showRaw = value !== item.raw
+              // 一覧の表示だけ、制御文字（GSなど）を目に見える記号にする。コピーする値
+              // （value・item.raw そのもの）は一切変えない。バーコードだけに適用する
+              // （OCRの改行等まで記号化すると、複数行のOCR結果が読みにくくなるため）。
+              const displayValue = item.source === 'barcode' ? visualizeControlChars(value) : value
+              const displayRaw = item.source === 'barcode' ? visualizeControlChars(item.raw) : item.raw
               return (
                 <li key={item.id} className="flex items-start gap-2 p-3">
                   <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${sourceBadgeClass(item.source)}`}>
@@ -905,10 +966,10 @@ export function SimpleScanScreen() {
                   </span>
                   <div className="min-w-0 flex-1">
                     <pre className="whitespace-pre-wrap break-all font-mono text-sm text-slate-100">
-                      {value === '' ? '(空文字)' : value}
+                      {displayValue === '' ? '(空文字)' : displayValue}
                     </pre>
                     {showRaw && (
-                      <p className="mt-0.5 whitespace-pre-wrap break-all text-[11px] text-slate-500">元の読み取り: {item.raw}</p>
+                      <p className="mt-0.5 whitespace-pre-wrap break-all text-[11px] text-slate-500">元の読み取り: {displayRaw}</p>
                     )}
                   </div>
                   <button
@@ -958,6 +1019,25 @@ export function SimpleScanScreen() {
           }
         >
           <HelpSheet onClose={handleCloseHelp} />
+        </Suspense>
+      )}
+
+      {/* 整形パネル。別チャンクなので、開くまでは読み込まれない。プレビュー欄の初期値には
+          一覧にある直近のバーコード値（元の読み取り値）を渡す（無ければ空欄のまま）。 */}
+      {trimPanelOpen && (
+        <Suspense
+          fallback={
+            <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950">
+              <SpinnerIcon className="h-8 w-8 text-slate-400" />
+            </div>
+          }
+        >
+          <TrimPanel
+            rules={trimRules}
+            onChange={handleChangeTrimRules}
+            previewSeed={results.find((item) => item.source === 'barcode')?.raw ?? null}
+            onClose={handleCloseTrimPanel}
+          />
         </Suspense>
       )}
     </div>
