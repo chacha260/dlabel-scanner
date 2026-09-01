@@ -2,12 +2,12 @@
 // 項目リスト、そして常時表示のテストパッドで構成する。
 
 import { useState } from 'react'
-import type { FieldRule, Profile } from '../parse/types'
-import { newFieldId } from '../parse/engine'
-import { Button } from './components/Button'
-import { Chip, Field, Switch, TextInput } from './components/Controls'
-import { BackIcon, PlusIcon, TrashIcon } from './components/Icons'
-import { DELIMITER_PRESETS, describeDelimiter } from './lib'
+import type { FieldRule, Profile } from '../../parse/types'
+import { newFieldId } from '../../parse/engine'
+import { Button } from '../components/Button'
+import { Chip, Field, Switch, TextInput } from '../components/Controls'
+import { BackIcon, PlusIcon, TrashIcon } from '../components/Icons'
+import { DELIMITER_PRESETS, describeDelimiter } from '../lib'
 import { FieldRuleEditor } from './FieldRuleEditor'
 import { TestPad } from './TestPad'
 

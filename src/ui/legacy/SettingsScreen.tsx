@@ -2,15 +2,15 @@
 // OCRエンジンの事前ダウンロード、履歴の全削除、アプリ情報を提供する。
 
 import { useEffect, useRef, useState } from 'react'
-import type { AppSettings } from '../store/db'
-import { clearRecords, countRecords } from '../store/records'
-import { useSettings } from '../store/useStore'
-import { isStoragePersisted, requestStoragePersistence } from '../store/storagePersistence'
-import { preloadOcr, type OcrProgress } from '../scan/ocr'
-import { Button } from './components/Button'
-import { Field, Select, Switch, TextInput } from './components/Controls'
-import { Sheet } from './components/Sheet'
-import { showToast } from './components/toastBus'
+import type { AppSettings } from '../../store/db'
+import { clearRecords, countRecords } from '../../store/records'
+import { useSettings } from '../../store/useStore'
+import { isStoragePersisted, requestStoragePersistence } from '../../store/storagePersistence'
+import { preloadOcr, type OcrProgress } from '../../scan/ocr'
+import { Button } from '../components/Button'
+import { Field, Select, Switch, TextInput } from '../components/Controls'
+import { Sheet } from '../components/Sheet'
+import { showToast } from '../components/toastBus'
 
 const APP_VERSION = '0.0.0'
 

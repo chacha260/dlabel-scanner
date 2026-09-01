@@ -2,34 +2,39 @@
 // React にも DOM にも依存しない純粋関数のみを置き、単体テストしやすくする。
 // ScanScreen.tsx はここで計算した結果を useBarcodeScanner の enabled に渡すだけにする。
 
+// 画面によって存在するオーバーレイの種類は異なる（例: 単一画面構成では
+// プロファイル選択シートやフィールド編集など、そもそも存在しないものがある）。
+// 各フラグは省略可能にし、省略時は「開いていない」として扱う。呼び出し側は
+// 自分の画面に実在するオーバーレイの分だけ渡せばよい。
+
 /** データ表示中の各種オーバーレイの開閉状態。1つでも開いていればバーコード検出は止める */
 export type OverlayFlags = {
   /** ラベル定義の選択シート */
-  profilePickerOpen: boolean
+  profilePickerOpen?: boolean
   /** 生データ表示パネル */
-  rawPanelOpen: boolean
+  rawPanelOpen?: boolean
   /** フィールドごとの手入力/部分OCRエディタ */
-  fieldEditorOpen: boolean
+  fieldEditorOpen?: boolean
   /** シャッターで撮った画像とOCR結果を表示している状態（処理中も含む） */
-  ocrResultPanelOpen: boolean
+  ocrResultPanelOpen?: boolean
   /** 「不足のまま保存」確認ダイアログ */
-  forceConfirmOpen: boolean
+  forceConfirmOpen?: boolean
   /** クリア確認ダイアログ */
-  clearConfirmOpen: boolean
+  clearConfirmOpen?: boolean
   /** 起動時の「作業中のデータがあります」復元バー（ユーザーの選択待ち） */
-  draftBannerOpen: boolean
+  draftBannerOpen?: boolean
 }
 
 /** いずれかのオーバーレイが開いているか */
 export function isAnyOverlayOpen(flags: OverlayFlags): boolean {
   return (
-    flags.profilePickerOpen ||
-    flags.rawPanelOpen ||
-    flags.fieldEditorOpen ||
-    flags.ocrResultPanelOpen ||
-    flags.forceConfirmOpen ||
-    flags.clearConfirmOpen ||
-    flags.draftBannerOpen
+    (flags.profilePickerOpen ?? false) ||
+    (flags.rawPanelOpen ?? false) ||
+    (flags.fieldEditorOpen ?? false) ||
+    (flags.ocrResultPanelOpen ?? false) ||
+    (flags.forceConfirmOpen ?? false) ||
+    (flags.clearConfirmOpen ?? false) ||
+    (flags.draftBannerOpen ?? false)
   )
 }
 

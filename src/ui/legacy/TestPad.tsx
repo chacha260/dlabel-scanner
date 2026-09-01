@@ -3,12 +3,12 @@
 // 未知のラベルの構造を調べるための主要な手段になる画面なので、常に見える位置に置く。
 
 import { useMemo, useState } from 'react'
-import type { Profile, RawScan } from '../parse/types'
-import { applyProfile } from '../parse/engine'
-import { listRecords } from '../store/records'
-import { Button } from './components/Button'
-import { Textarea } from './components/Controls'
-import { showToast } from './components/toastBus'
+import type { Profile, RawScan } from '../../parse/types'
+import { applyProfile } from '../../parse/engine'
+import { listRecords } from '../../store/records'
+import { Button } from '../components/Button'
+import { Textarea } from '../components/Controls'
+import { showToast } from '../components/toastBus'
 
 type TestPadProps = {
   profile: Profile

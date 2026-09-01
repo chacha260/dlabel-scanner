@@ -1,5 +1,11 @@
-// OCR 前処理: 映像から関心領域 (ROI) を切り出し、グレースケール化・大津の二値化・
+// OCR 前処理: 映像から関心領域 (ROI) を切り出し、グレースケール化・
 // 画素数予算に基づくスケーリングを行う。外部ライブラリに依存しない純粋な canvas 処理。
+//
+// 以前はここでヒストグラムから大津の手法によるしきい値を求めて二値化していたが、
+// Tesseract は内部で自前の適応的二値化を行うため、事前にハード二値化した画像より
+// 素のグレースケール画像の方が概して認識精度が良い。ROI 帯にバーコードのバーが
+// 写り込むと、大津の二値化はそれを大きな黒い塊にしてしまい、むしろ有害だった。
+// そのため二値化は行わず、グレースケール化とスケーリングのみを行う。
 
 import type { RoiRect } from './types'
 
@@ -41,43 +47,8 @@ function getContext2d(canvas: OffscreenCanvas): OffscreenCanvasRenderingContext2
   return ctx
 }
 
-// 256 階調ヒストグラムからクラス間分散を最大化するしきい値を求める（大津の手法）
-function otsuThreshold(histogram: Uint32Array, totalPixels: number): number {
-  let sumAll = 0
-  for (let t = 0; t < 256; t++) {
-    sumAll += t * histogram[t]
-  }
-
-  let sumBackground = 0
-  let weightBackground = 0
-  let bestThreshold = 0
-  let bestVariance = -1
-
-  for (let t = 0; t < 256; t++) {
-    weightBackground += histogram[t]
-    if (weightBackground === 0) continue
-
-    const weightForeground = totalPixels - weightBackground
-    if (weightForeground === 0) break
-
-    sumBackground += t * histogram[t]
-
-    const meanBackground = sumBackground / weightBackground
-    const meanForeground = (sumAll - sumBackground) / weightForeground
-    const meanDiff = meanBackground - meanForeground
-    const betweenClassVariance = weightBackground * weightForeground * meanDiff * meanDiff
-
-    if (betweenClassVariance > bestVariance) {
-      bestVariance = betweenClassVariance
-      bestThreshold = t
-    }
-  }
-
-  return bestThreshold
-}
-
-// scale >= 1: ニアレストネイバーで拡大しながら二値化する（文字の輪郭が滑らかにならず OCR 向き）
-function resampleUpscale(gray: Uint8ClampedArray, sw: number, sh: number, threshold: number, scale: number): ImageData {
+// scale >= 1: ニアレストネイバーで拡大する（グレースケールのまま。二値化はしない）
+function resampleUpscale(gray: Uint8ClampedArray, sw: number, sh: number, scale: number): ImageData {
   const outW = Math.max(1, Math.round(sw * scale))
   const outH = Math.max(1, Math.round(sh * scale))
   const out = new ImageData(outW, outH)
@@ -88,7 +59,7 @@ function resampleUpscale(gray: Uint8ClampedArray, sw: number, sh: number, thresh
     const rowOffset = srcY * sw
     for (let x = 0; x < outW; x++) {
       const srcX = Math.min(sw - 1, Math.floor((x * sw) / outW))
-      const value = gray[rowOffset + srcX] > threshold ? 255 : 0
+      const value = gray[rowOffset + srcX]
       const o = (y * outW + x) * 4
       outData[o] = value
       outData[o + 1] = value
@@ -101,9 +72,8 @@ function resampleUpscale(gray: Uint8ClampedArray, sw: number, sh: number, thresh
 }
 
 // scale < 1: ニアレストネイバーはエイリアシング（文字のかすれ・欠け）が目立つため、
-// 出力1画素あたりの元画素を平均するボックスフィルタで縮小する。
-// 平均はグレースケールの状態で行い、その後にしきい値で二値化する。
-function resampleDownscale(gray: Uint8ClampedArray, sw: number, sh: number, threshold: number, scale: number): ImageData {
+// 出力1画素あたりの元画素を平均するボックスフィルタで縮小する（グレースケールのまま）。
+function resampleDownscale(gray: Uint8ClampedArray, sw: number, sh: number, scale: number): ImageData {
   const outW = Math.max(1, Math.round(sw * scale))
   const outH = Math.max(1, Math.round(sh * scale))
   const out = new ImageData(outW, outH)
@@ -125,8 +95,7 @@ function resampleDownscale(gray: Uint8ClampedArray, sw: number, sh: number, thre
           count++
         }
       }
-      const average = count > 0 ? sum / count : 0
-      const value = average > threshold ? 255 : 0
+      const value = count > 0 ? Math.round(sum / count) : 0
       const o = (y * outW + x) * 4
       outData[o] = value
       outData[o + 1] = value
@@ -152,21 +121,15 @@ export function preprocessRoi(source: HTMLVideoElement, roi: RoiRect): ImageData
   cropCtx.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh)
   const { data } = cropCtx.getImageData(0, 0, sw, sh)
 
-  // グレースケール化（輝度＝ luma）とヒストグラム作成を同時に行う
+  // グレースケール化（輝度＝ luma）。二値化はしない。
   const pixelCount = sw * sh
   const gray = new Uint8ClampedArray(pixelCount)
-  const histogram = new Uint32Array(256)
   for (let i = 0; i < pixelCount; i++) {
     const o = i * 4
-    const luma = Math.round(0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2])
-    gray[i] = luma
-    histogram[luma] += 1
+    gray[i] = Math.round(0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2])
   }
 
-  const threshold = otsuThreshold(histogram, pixelCount)
   const scale = computeOcrScale(sw, sh)
 
-  return scale >= 1
-    ? resampleUpscale(gray, sw, sh, threshold, scale)
-    : resampleDownscale(gray, sw, sh, threshold, scale)
+  return scale >= 1 ? resampleUpscale(gray, sw, sh, scale) : resampleDownscale(gray, sw, sh, scale)
 }

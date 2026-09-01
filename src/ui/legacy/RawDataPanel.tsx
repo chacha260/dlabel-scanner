@@ -1,12 +1,12 @@
 // 生データ表示パネル。バッファ中の RawScan を加工せずそのまま並べる。
 // 未知のラベルの構造を調べる手段になるため、省略せずコピーしやすく見せることを優先する。
 
-import type { RawScan } from '../parse/types'
-import { Sheet } from './components/Sheet'
-import { Button } from './components/Button'
-import { CopyIcon } from './components/Icons'
-import { copyToClipboard, describeDelimiter, formatDateTime, sourceBadgeClass, sourceBadgeLabel } from './lib'
-import { showToast } from './components/toastBus'
+import type { RawScan } from '../../parse/types'
+import { Sheet } from '../components/Sheet'
+import { Button } from '../components/Button'
+import { CopyIcon } from '../components/Icons'
+import { copyToClipboard, describeDelimiter, formatDateTime, sourceBadgeClass, sourceBadgeLabel } from '../lib'
+import { showToast } from '../components/toastBus'
 
 type RawDataPanelProps = {
   open: boolean

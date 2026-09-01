@@ -2,10 +2,10 @@
 // OCR・手入力を組み合わせて1件のレコードを組み立て、確定して保存する。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { FieldValue, ParsedRecord, RawScan } from '../parse/types'
-import { applyProfile } from '../parse/engine'
-import { saveRecord } from '../store/records'
-import { useProfiles, useSettings } from '../store/useStore'
+import type { FieldValue, ParsedRecord, RawScan } from '../../parse/types'
+import { applyProfile } from '../../parse/engine'
+import { saveRecord } from '../../store/records'
+import { useProfiles, useSettings } from '../../store/useStore'
 import {
   clearDraft,
   countDraftScans,
@@ -15,10 +15,10 @@ import {
   resolveDraftProfile,
   saveDraft,
   type ScanDraft,
-} from '../store/draft'
-import { useCamera } from '../camera/useCamera'
-import { useBarcodeScanner } from '../scan/useBarcodeScanner'
-import { isAnyOverlayOpen, isBarcodeScanEnabled } from '../scan/scanGating'
+} from '../../store/draft'
+import { useCamera } from '../../camera/useCamera'
+import { useBarcodeScanner } from '../../scan/useBarcodeScanner'
+import { isAnyOverlayOpen, isBarcodeScanEnabled } from '../../scan/scanGating'
 import {
   captureRoi,
   DEFAULT_OCR_OPTIONS,
@@ -27,9 +27,9 @@ import {
   recognizeCaptured,
   type OcrProgress,
   type RoiRect,
-} from '../scan/ocr'
-import { Button } from './components/Button'
-import { Sheet } from './components/Sheet'
+} from '../../scan/ocr'
+import { Button } from '../components/Button'
+import { Sheet } from '../components/Sheet'
 import {
   CheckIcon,
   CloseIcon,
@@ -40,8 +40,8 @@ import {
   ScanIcon,
   SpinnerIcon,
   WarningIcon,
-} from './components/Icons'
-import { showToast } from './components/toastBus'
+} from '../components/Icons'
+import { showToast } from '../components/toastBus'
 import { RecordSheet } from './RecordSheet'
 import { RawDataPanel } from './RawDataPanel'
 
@@ -320,9 +320,10 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
 
   // 設定未読み込み時（settings が null）だけ既定値にフォールバックする。
   // 読み込み済みなら、ユーザーが空欄を選んでいてもそのまま尊重する。
+  // 文字ホワイトリストは LSTM エンジンでは不安定なため OcrOptions から削除済み。
+  // settings.ocrWhitelist 自体は設定画面の項目として残す（配線先がなくなっただけ）。
   const ocrOptions = useMemo(
     () => ({
-      whitelist: settings?.ocrWhitelist ?? DEFAULT_OCR_OPTIONS.whitelist,
       psm: settings?.ocrPsm ?? DEFAULT_OCR_OPTIONS.psm,
     }),
     [settings],

@@ -2,17 +2,17 @@
 // 行をタップすると ProfileEditor を開く。
 
 import { useState } from 'react'
-import type { Profile } from '../parse/types'
-import { newProfileId } from '../parse/engine'
-import { PRESET_PROFILES } from '../parse/presets'
-import { deleteProfile, duplicateProfile, exportProfileJson, importProfileJson, saveProfile } from '../store/profiles'
-import { useProfiles } from '../store/useStore'
-import { Button } from './components/Button'
-import { Textarea } from './components/Controls'
-import { Sheet } from './components/Sheet'
-import { CheckIcon, CopyIcon, DuplicateIcon, PlusIcon, TrashIcon } from './components/Icons'
-import { showToast } from './components/toastBus'
-import { copyToClipboard } from './lib'
+import type { Profile } from '../../parse/types'
+import { newProfileId } from '../../parse/engine'
+import { PRESET_PROFILES } from '../../parse/presets'
+import { deleteProfile, duplicateProfile, exportProfileJson, importProfileJson, saveProfile } from '../../store/profiles'
+import { useProfiles } from '../../store/useStore'
+import { Button } from '../components/Button'
+import { Textarea } from '../components/Controls'
+import { Sheet } from '../components/Sheet'
+import { CheckIcon, CopyIcon, DuplicateIcon, PlusIcon, TrashIcon } from '../components/Icons'
+import { showToast } from '../components/toastBus'
+import { copyToClipboard } from '../lib'
 import { ProfileEditor } from './ProfileEditor'
 
 const BLANK_PROFILE_TEMPLATE: Omit<Profile, 'id'> = {

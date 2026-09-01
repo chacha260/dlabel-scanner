@@ -3,13 +3,12 @@ import { createRoot } from 'react-dom/client'
 import { registerSW } from 'virtual:pwa-register'
 import './index.css'
 import App from './App.tsx'
-import { requestStoragePersistence } from './store/storagePersistence'
 import { showToast } from './ui/components/toastBus'
 import { markNeedRefresh } from './ui/components/updateBus'
 
-// Android は空き容量が少ないと確認なしに IndexedDB を丸ごと消去することがあるため、
-// 起動時に一度だけ永続化保護を要求しておく。対応状況・許可状況は設定画面で確認できる。
-void requestStoragePersistence()
+// 現在の画面は結果をメモリ上にしか保持しない（意図的にIndexedDBへ永続化しない）ため、
+// ストレージ永続化保護（navigator.storage.persist()）を要求する意味がない。
+// store/storagePersistence.ts 自体は削除せず、再配線時のために残してある。
 
 // オフライン利用のため Service Worker を登録する。
 // registerType: 'prompt'（vite.config.ts）のため、新しいバージョンが見つかっても

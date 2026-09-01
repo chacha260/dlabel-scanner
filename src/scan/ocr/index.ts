@@ -8,6 +8,8 @@ import type { OcrOptions, OcrResult, RoiRect } from './types'
 export { DEFAULT_OCR_OPTIONS } from './types'
 export type { OcrOptions, OcrResult, RoiRect } from './types'
 export { computeOcrScale, OCR_PIXEL_BUDGET } from './preprocess'
+export { applyOcrFilter, filterAlnumOnly, filterDigitsOnly, OCR_FILTER_LABELS } from './postprocess'
+export type { OcrFilterMode } from './postprocess'
 
 // OCR エンジンのダウンロード/初期化/認識の進捗。progress は 0..1、status は日本語の表示文言。
 export type OcrProgress = { status: string; progress: number }

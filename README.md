@@ -1,32 +1,58 @@
-# React + TypeScript + Vite
+# Dラベル スキャナ
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+現品票・Dラベルのバーコード / OCR 読み取りツール（完全オフライン・PWA）。
 
-Currently, two official plugins are available:
+## 今のアプリが何をするか
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+画面は1つだけです（`src/ui/SimpleScanScreen.tsx`）。
 
-## React Compiler
+- カメラ映像を表示しながら、バーコードを継続的に検出します。
+- 画面中央の枠（ROI）に対して「枠内をOCR」ボタンでシャッターを切り、その瞬間の画像を認識します。
+- バーコードとOCRの結果は、フィールドへの振り分けや保存を行わず、**1本の一覧に時系列（新しい順）でそのまま並べるだけ**です。
+- 一覧の各行はコピー・削除ができ、フッターの「全部コピー」で改行区切りの全件、「クリア」で一覧を空にできます。
+- 結果は**メモリ上にのみ**保持されます。画面を閉じる/リロードすると消えます。これは意図的な仕様です（後述）。
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+OCR結果カードには、このアプリで唯一の設定項目として次の2つがあります。
 
-## Expanding the Oxlint configuration
+- **PSM選択**（単一行 / 単語 / ブロック）: Tesseract の Page Segmentation Mode。
+- **抽出フィルタ**（フィルタなし / 数字のみ抽出 / 英数字のみ抽出）: 認識済みテキストに対する後処理。エンジンの認識結果（生テキスト）は常に別行で見せ続けます。
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+## なぜこんなに機能が少ないのか
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+もともとこのアプリには、ラベル定義エディタ・スキャン履歴・CSV書き出し・設定画面・フィールド単位の組み立てといった機能一式がありました。しかし、現場（倉庫・工場フロア）の具体的な要件がまだ固まっていない段階でこれらを作り込んでしまい、UIが煩雑になっていました。
+
+そこで、まずは最小限の「読み取るだけ」のツールを現場に持って行き、実際に何が必要かを確認する方針に変更しました。
+
+- **画面は1つだけ**（タブなし・履歴なし・CSV書き出しなし・プロファイル編集なし・設定画面なし）
+- **永続化なし**（結果はメモリ上のみ。意図的な仕様）
+
+## 退避済みの機能（削除ではない）
+
+要件が固まったら再配線する前提で、コードは削除せずに残してあります。
+
+- `src/ui/legacy/` — 旧来の画面一式（`ScanScreen.tsx` / `RecordSheet.tsx` / `RawDataPanel.tsx` / `HistoryScreen.tsx` / `ExportScreen.tsx` / `ProfileListScreen.tsx` / `ProfileEditor.tsx` / `FieldRuleEditor.tsx` / `TestPad.tsx` / `SettingsScreen.tsx`）。どの画面からも呼ばれていませんが、型チェックは通る状態を維持しています。
+- `src/parse/` — バーコード/OCR結果をラベル定義（プロファイル）に従ってフィールドへ変換するパース・バリデーションエンジン。
+- `src/store/` — IndexedDB（プロファイル・履歴・設定・下書き）まわりの永続化コード一式。
+- `src/export/` — CSV書き出し。
+
+これらは `src/ui/legacy/` の画面から参照されており、現在のアプリの実行パスからは呼ばれていませんが、`tsc -b` の型チェック対象には含まれています。
+
+## 今回のOCR修正について
+
+「数字が認識されない」という不具合の原因は2つありました。
+
+1. `tessedit_char_whitelist`（文字ホワイトリスト）を設定していたこと。LSTMエンジン（本アプリの既定）ではこのパラメータの指定が不安定で、文字がまるごと脱落する既知の原因になるため、エンジンへの指定自体をやめました。絞り込みが必要な場合は、認識後のテキストに対して JS側でフィルタをかける方式（`src/scan/ocr/postprocess.ts`）に置き換えています。
+2. 認識前に自前で大津の二値化（Otsu binarization）を行っていたこと。Tesseract は内部で自前の適応的二値化を行うため、事前にハード二値化した画像より素のグレースケール画像の方が概して精度が良く、特にROI帯にバーコードのバーが写り込むケースでは二値化がバーを大きな黒い塊にしてしまい有害でした。二値化は削除し、グレースケール化とスケーリング（`computeOcrScale`）のみを残しています。
+
+## 動かし方
+
+```bash
+pnpm install
+pnpm dev        # 開発サーバー
+pnpm build      # 型チェック + 本番ビルド（dist/ に出力）
+pnpm preview    # ビルド済みアプリをローカルで確認
+pnpm test       # vitest によるユニットテスト
+pnpm lint       # oxlint
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+カメラ・バーコード検出は HTTPS（または localhost）が必要です。OCRエンジン（tesseract.js、約9MB）は初回利用時にのみダウンロードし、Service Worker のキャッシュ（`vendor/**`）によって以降はオフラインで動作します。

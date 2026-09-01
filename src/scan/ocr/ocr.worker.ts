@@ -65,7 +65,6 @@ function resolveCoreFileName(): string {
 
 let tesseractWorkerPromise: Promise<TesseractWorker> | null = null
 let appliedPsm: OcrOptions['psm'] | null = null
-let appliedWhitelist: string | null = null
 
 // 現在処理中のリクエスト id。tesseract.js の logger はジョブ単位の id を持たないため、
 // 直近に処理を開始したリクエストの id を進捗の宛先として扱う
@@ -121,15 +120,13 @@ async function getTesseractWorker(): Promise<TesseractWorker> {
 }
 
 async function applyOptionsIfChanged(worker: TesseractWorker, options: OcrOptions): Promise<void> {
-  if (appliedPsm === options.psm && appliedWhitelist === options.whitelist) return
+  if (appliedPsm === options.psm) return
 
   const params: SetParametersArg = {
     tessedit_pageseg_mode: options.psm as unknown as SetParametersArg['tessedit_pageseg_mode'],
-    tessedit_char_whitelist: options.whitelist,
   }
   await worker.setParameters(params)
   appliedPsm = options.psm
-  appliedWhitelist = options.whitelist
 }
 
 async function handleRecognize(request: RecognizeRequest): Promise<void> {
@@ -179,7 +176,6 @@ async function handleTerminate(): Promise<void> {
   const pending = tesseractWorkerPromise
   tesseractWorkerPromise = null
   appliedPsm = null
-  appliedWhitelist = null
   if (!pending) return
   try {
     const worker = await pending

@@ -4,11 +4,11 @@
 // 一時停止判定にこの開閉状態を使うため、内部 state に閉じ込めない）。
 
 import { useState } from 'react'
-import type { FieldRule, FieldValue } from '../parse/types'
-import { Button } from './components/Button'
-import { TextInput } from './components/Controls'
-import { CheckIcon, ChevronDownIcon, ChevronUpIcon, WarningIcon } from './components/Icons'
-import { sourceBadgeClass, sourceBadgeLabel } from './lib'
+import type { FieldRule, FieldValue } from '../../parse/types'
+import { Button } from '../components/Button'
+import { TextInput } from '../components/Controls'
+import { CheckIcon, ChevronDownIcon, ChevronUpIcon, WarningIcon } from '../components/Icons'
+import { sourceBadgeClass, sourceBadgeLabel } from '../lib'
 
 type RecordSheetProps = {
   fields: FieldRule[]

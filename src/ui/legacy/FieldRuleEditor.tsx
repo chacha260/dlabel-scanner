@@ -3,10 +3,10 @@
 // 順序付きリストとして追加・削除・並べ替えできるようにする。
 
 import { useState } from 'react'
-import type { FieldRule, Matcher, TransformStep } from '../parse/types'
-import { Field, Select, Switch, TextInput } from './components/Controls'
-import { ChevronDownIcon, ChevronUpIcon, TrashIcon } from './components/Icons'
-import { MATCHER_EXPLANATIONS, MATCHER_LABELS, TRANSFORM_LABELS } from './lib'
+import type { FieldRule, Matcher, TransformStep } from '../../parse/types'
+import { Field, Select, Switch, TextInput } from '../components/Controls'
+import { ChevronDownIcon, ChevronUpIcon, TrashIcon } from '../components/Icons'
+import { MATCHER_EXPLANATIONS, MATCHER_LABELS, TRANSFORM_LABELS } from '../lib'
 
 type FieldRuleEditorProps = {
   field: FieldRule
