@@ -2,7 +2,7 @@
 // 標準の DOM 型定義には含まれていないため、必要最小限のインターフェースを
 // このファイル内だけで宣言する（グローバル汚染を避ける）。
 
-import type { BarcodeHit, BarcodeReader, NormalizedRect } from './types'
+import type { BarcodeHit, BarcodeInput, BarcodeReader, NormalizedRect } from './types'
 import { SUPPORTED_FORMATS } from './types'
 
 // boundingBox は DOMRectReadOnly だが、使うのは x/y/width/height の4値だけなので
@@ -17,7 +17,7 @@ interface BoundingBoxLike {
 interface DetectedBarcodeLike {
   rawValue: string
   format: string
-  // detect() に渡した ImageBitmap のピクセル座標系（= 映像座標に対応する解像度）。
+  // detect() に渡した入力（video / canvas）自身のピクセル座標系（= 映像座標に対応する解像度）。
   boundingBox: BoundingBoxLike
 }
 
@@ -41,12 +41,26 @@ function toNormalizedBox(box: BoundingBoxLike | undefined, imageWidth: number, i
 }
 
 interface BarcodeDetectorLike {
-  detect(source: ImageBitmap): Promise<DetectedBarcodeLike[]>
+  // 実際の BarcodeDetector.detect() は ImageBitmapSource（<video> や canvas を含む）を
+  // 受け付ける。ここではこのアプリで実際に渡す2種類（BarcodeInput）だけに絞る。
+  detect(source: BarcodeInput): Promise<DetectedBarcodeLike[]>
 }
 
 interface BarcodeDetectorConstructorLike {
   new (options?: { formats: string[] }): BarcodeDetectorLike
   getSupportedFormats(): Promise<string[]>
+}
+
+// 渡された入力そのものの実解像度を得る。<video> は width/height ではなく
+// videoWidth/videoHeight に実解像度を持つため、OffscreenCanvas と分けて扱う。
+// ここで求めた値が boundingBox の正規化（0..1 化）の分母になるため、
+// 「実際に detect() へ渡した入力」のサイズを必ず使うこと
+// （呼び出し側の想定と食い違うと、バーコードマスクの位置が静かにズレる）。
+function inputSize(input: BarcodeInput): { width: number; height: number } {
+  if (input instanceof OffscreenCanvas) {
+    return { width: input.width, height: input.height }
+  }
+  return { width: input.videoWidth, height: input.videoHeight }
 }
 
 function getBarcodeDetectorCtor(): BarcodeDetectorConstructorLike | undefined {
@@ -69,24 +83,26 @@ export async function createNativeReader(): Promise<BarcodeReader> {
   const detector = new BarcodeDetectorCtor({ formats: formats.length > 0 ? formats : [...SUPPORTED_FORMATS] })
 
   return {
-    async detect(bitmap: ImageBitmap): Promise<BarcodeHit[]> {
+    async detect(input: BarcodeInput): Promise<BarcodeHit[]> {
+      // <video> をそのまま渡せるため、ここでは canvas への描画・ダウンスケール・
+      // ImageBitmap 生成のいずれも行わない（BarcodeDetector はネイティブ実装のため、
+      // フル解像度のままでも 720px へ縮小していた頃よりコストは小さい）。
+      const { width, height } = inputSize(input)
       try {
-        const results = await detector.detect(bitmap)
+        const results = await detector.detect(input)
         return results.map((r) => ({
           value: r.rawValue,
           format: r.format,
-          box: toNormalizedBox(r.boundingBox, bitmap.width, bitmap.height),
+          box: toNormalizedBox(r.boundingBox, width, height),
         }))
       } catch {
         // 検出エラーは「見つからなかった」として扱い、フレームループを止めない
         return []
-      } finally {
-        // ネイティブ経路では bitmap の所有権をこのリーダーが持つため、ここで解放する
-        bitmap.close()
       }
     },
     close() {
-      // ネイティブ実装はリソース解放不要
+      // ネイティブ実装はリソース解放不要。このリーダーは入力（video / canvas）の
+      // 所有権を一切持たない（ImageBitmap を生成しないため close() すべき対象もない）。
     },
   }
 }

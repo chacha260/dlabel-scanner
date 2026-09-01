@@ -12,9 +12,10 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { RawScan } from '../parse/types'
 import type { NormalizedRect } from '../scan/barcode/types'
 import { useCamera } from '../camera/useCamera'
+import { resolveZoomValue } from '../camera/zoom'
 import { useBarcodeScanner } from '../scan/useBarcodeScanner'
 import { isAnyOverlayOpen, isBarcodeScanEnabled } from '../scan/scanGating'
-import { loadHelpSeen, loadSoundEnabled, markHelpSeen, saveSoundEnabled } from './prefs'
+import { loadHelpSeen, loadSoundEnabled, loadZoom, markHelpSeen, saveSoundEnabled, saveZoom } from './prefs'
 import {
   applyOcrFilter,
   boxesToMask,
@@ -202,6 +203,32 @@ export function SimpleScanScreen() {
       markHelpSeen()
     }
   }, [])
+
+  // ズーム対応端末でだけ、直前に使っていたズーム値を復元する。
+  // カメラが（再試行等で）張り直されるたびに再適用できるよう、
+  // camera.stream の参照が変わったら「まだ適用していない」状態に戻す。
+  const zoomAppliedRef = useRef(false)
+  useEffect(() => {
+    zoomAppliedRef.current = false
+  }, [camera.stream])
+  useEffect(() => {
+    if (zoomAppliedRef.current) return
+    if (!camera.ready || !camera.zoomSupported || !camera.zoomRange) return
+    zoomAppliedRef.current = true
+    // 保存値は別端末のものである可能性があるため、必ず今の端末の範囲で検証してから使う
+    const value = resolveZoomValue(loadZoom(), camera.zoomRange)
+    if (value !== null) void camera.setZoom(value)
+    // camera.setZoom は useCamera 内で useCallback により安定した参照
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [camera.ready, camera.zoomSupported, camera.zoomRange, camera.setZoom])
+
+  const handleZoomChange = useCallback(
+    (value: number) => {
+      void camera.setZoom(value)
+      saveZoom(value)
+    },
+    [camera],
+  )
 
   const handleOpenHelp = useCallback(() => setHelpOpen(true), [])
   const handleCloseHelp = useCallback(() => setHelpOpen(false), [])
@@ -521,9 +548,12 @@ export function SimpleScanScreen() {
           </div>
         )}
 
-        {/* 右上は固定表示の「?」ヘルプボタンと重なるため、その分だけ左に寄せる */}
+        {/* 右上は固定表示の「?」ヘルプボタンと重なるため、その分だけ左に寄せる。
+            解像度は「実際に端末が提供している値」の診断表示（あくまで補助情報なので
+            バックエンド表示のすぐ横に小さく添えるだけに留め、目立たせすぎない）。 */}
         <span className="absolute right-14 top-2 rounded-lg bg-slate-900/80 px-2 py-1 text-[10px] font-semibold text-slate-300">
           BC: {backendLabel}
+          {camera.resolution && ` / ${camera.resolution.width}×${camera.resolution.height}`}
         </span>
 
         {!camera.error && (
@@ -534,6 +564,31 @@ export function SimpleScanScreen() {
           >
             枠をリセット
           </button>
+        )}
+
+        {/* ズームスライダー: 対応端末でだけ表示する。ROI 枠（上の absolute div）とは
+            兄弟要素として previewRef 直下に置き、ROI のドラッグハンドラが登録されている
+            DOM 部分木の外に出すことで、ここでのポインタ操作が ROI 移動として
+            誤検出されないようにする（念のため stopPropagation も併用）。 */}
+        {!camera.error && camera.zoomSupported && camera.zoomRange && camera.zoom !== null && (
+          <div
+            className="absolute inset-x-3 bottom-2 z-20 flex items-center gap-2 rounded-lg bg-slate-900/80 px-2.5 py-1.5"
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerMove={(e) => e.stopPropagation()}
+            onPointerUp={(e) => e.stopPropagation()}
+          >
+            <span className="shrink-0 text-[10px] font-semibold text-slate-300">ズーム</span>
+            <input
+              type="range"
+              aria-label="ズーム"
+              min={camera.zoomRange.min}
+              max={camera.zoomRange.max}
+              step={camera.zoomRange.step > 0 ? camera.zoomRange.step : 0.1}
+              value={camera.zoom}
+              onChange={(e) => handleZoomChange(Number(e.target.value))}
+              className="h-2 min-w-0 flex-1 accent-cyan-400"
+            />
+          </div>
         )}
       </div>
 

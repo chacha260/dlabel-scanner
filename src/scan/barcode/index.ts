@@ -1,10 +1,10 @@
 // UI から見た唯一の入口。どちらのバックエンド（ネイティブ / zxing-wasm）が
 // 動いているかを呼び出し側が意識しなくて済むようにするファサード。
 
-import type { BarcodeHit, BarcodeReader } from './types'
+import type { BarcodeHit, BarcodeInput, BarcodeReader } from './types'
 import { createNativeReader, isNativeAvailable } from './native'
 
-export type { BarcodeHit, BarcodeReader, NormalizedRect } from './types'
+export type { BarcodeHit, BarcodeInput, BarcodeReader, NormalizedRect } from './types'
 export { SUPPORTED_FORMATS } from './types'
 
 export type BarcodeBackend = 'native' | 'zxing'
@@ -14,6 +14,9 @@ type ResultMessage = { type: 'result'; id: number; hits: BarcodeHit[]; error?: s
 
 // zxing-wasm ワーカーを使う BarcodeReader 実装。id で紐づけた
 // Promise ベースのリクエスト / レスポンスとして振る舞う。
+// zxing-wasm は ImageData でしか読めないため、<video> / OffscreenCanvas の
+// どちらを渡されても、ここで ImageBitmap 化してからワーカーへ転送する
+// （呼び出し側は BarcodeReader.detect の入力を意識しなくてよい）。
 function createZxingReader(worker: Worker): BarcodeReader {
   let nextId = 0
   const pending = new Map<number, (hits: BarcodeHit[]) => void>()
@@ -29,7 +32,8 @@ function createZxingReader(worker: Worker): BarcodeReader {
   })
 
   return {
-    detect(bitmap: ImageBitmap): Promise<BarcodeHit[]> {
+    async detect(input: BarcodeInput): Promise<BarcodeHit[]> {
+      const bitmap = await createImageBitmap(input)
       const id = nextId++
       return new Promise<BarcodeHit[]>((resolve) => {
         pending.set(id, resolve)

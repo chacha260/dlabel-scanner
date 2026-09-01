@@ -43,3 +43,31 @@ export function markHelpSeen(): void {
     // 保存できなくても致命的ではないため無視する
   }
 }
+
+const ZOOM_STORAGE_KEY = 'dlabel.zoom'
+
+/**
+ * 直近のズーム値。保存値が無い・壊れている場合は null を返す
+ * （呼び出し側は「保存された値が無い」ものとして扱う）。
+ * 保存されたのが別端末での値である可能性があるため、適用前に必ず
+ * camera/zoom.ts の resolveZoomValue で現在の端末の範囲に対して検証すること。
+ */
+export function loadZoom(): number | null {
+  try {
+    const raw = localStorage.getItem(ZOOM_STORAGE_KEY)
+    if (raw === null) return null
+    const value = Number(raw)
+    return Number.isFinite(value) ? value : null
+  } catch {
+    // プライベートブラウジング等で読めなくても既定のズーム（範囲下限）で動作させる
+    return null
+  }
+}
+
+export function saveZoom(value: number): void {
+  try {
+    localStorage.setItem(ZOOM_STORAGE_KEY, String(value))
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
