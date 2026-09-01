@@ -1,0 +1,130 @@
+# GitLab CI 版の定義。GitHub Actions の ci.yml / apk.yml と同じことを行う。
+# 社内 GitLab（セルフホスト）でもそのまま使える。
+#
+# 注意: カメラを使うにはページが HTTPS で配信されている必要がある。
+# セルフホストの場合は GitLab Pages が HTTPS で提供されているか先に確認すること。
+
+stages:
+  - verify
+  - build
+  - deploy
+
+default:
+  image: node:24
+  before_script:
+    - corepack enable
+    - corepack prepare pnpm@10.33.0 --activate
+    - pnpm install --frozen-lockfile
+  cache:
+    key:
+      files:
+        - pnpm-lock.yaml
+    paths:
+      - .pnpm-store
+
+variables:
+  PNPM_HOME: "$CI_PROJECT_DIR/.pnpm-store"
+
+# ---------------------------------------------------------------
+# 型チェック・Lint・テスト
+# ---------------------------------------------------------------
+verify:
+  stage: verify
+  script:
+    - pnpm exec tsc -b --force
+    - pnpm lint
+    - pnpm test
+
+# ---------------------------------------------------------------
+# ビルドと Service Worker の検査
+# ---------------------------------------------------------------
+build:
+  stage: build
+  needs: [verify]
+  script:
+    # GitLab Pages はサブパス配信になるため、CI_PAGES_URL からパス部分を取り出して base に渡す。
+    # ルート配信（パスなし）の場合は "/" になるよう正規化する。
+    - |
+      RAW_PATH="$(printf '%s' "${CI_PAGES_URL:-}" | sed -E 's#^https?://[^/]*##')"
+      export BASE_PATH="$(printf '%s/' "$RAW_PATH" | sed -E 's#//+#/#g')"
+      echo "BASE_PATH=$BASE_PATH"
+    - pnpm build
+    # OCRエンジン(約16MB)がプリキャッシュに混入すると初回インストールが重くなるため、
+    # 設定変更による回帰をここで止める
+    - |
+      if grep -o 'precacheAndRoute(\[[^]]*\]' dist/sw.js | grep -q 'vendor'; then
+        echo "OCRエンジンがプリキャッシュに含まれています"; exit 1
+      fi
+      echo "OK: プリキャッシュに vendor は含まれていません"
+    - du -h dist/assets/* | sort -h
+  artifacts:
+    paths:
+      - dist
+    expire_in: 1 week
+
+# ---------------------------------------------------------------
+# GitLab Pages への配信
+# ---------------------------------------------------------------
+# GitLab Pages は成果物が public/ にあることを前提とする（17.9 以降は
+# pages.publish で別ディレクトリを指定できる）。このリポジトリには Vite の
+# 入力用 public/ が既に存在するため、ビルド後に置き換える。
+# 置き換えるのは CI の作業コピーのみで、リポジトリには影響しない。
+pages:
+  stage: deploy
+  needs: [build]
+  before_script: []
+  script:
+    - rm -rf public
+    - mv dist public
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ---------------------------------------------------------------
+# APK のビルド（手動実行、またはタグ）
+# ---------------------------------------------------------------
+apk:
+  stage: build
+  needs: [verify]
+  image: eclipse-temurin:21-jdk
+  variables:
+    ANDROID_HOME: "$CI_PROJECT_DIR/.android-sdk"
+    ANDROID_SDK_ROOT: "$CI_PROJECT_DIR/.android-sdk"
+  before_script:
+    # Node と pnpm（このジョブだけ JDK イメージを使うため個別に用意する）
+    - apt-get update -qq && apt-get install -y -qq curl unzip git
+    - curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y -qq nodejs
+    - corepack enable && corepack prepare pnpm@10.33.0 --activate
+    - pnpm install --frozen-lockfile
+    # Android コマンドラインツールと SDK
+    # compileSdk / targetSdk は android/variables.gradle の 36 に合わせている
+    - |
+      if [ ! -d "$ANDROID_HOME/platforms/android-36" ]; then
+        mkdir -p "$ANDROID_HOME/cmdline-tools"
+        curl -fsSL -o /tmp/tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+        unzip -q /tmp/tools.zip -d "$ANDROID_HOME/cmdline-tools"
+        mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+        yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+        "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+          "platform-tools" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+      fi
+  script:
+    - pnpm run build:apk
+    - cd android && ./gradlew assembleDebug --no-daemon
+    - ls -lh app/build/outputs/apk/debug/*.apk
+  cache:
+    key: android-sdk-36
+    paths:
+      - .android-sdk
+      - .gradle
+  artifacts:
+    name: "dlabel-scanner-debug-apk"
+    paths:
+      - android/app/build/outputs/apk/debug/*.apk
+    expire_in: 30 days
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v/
+    - when: manual
+      allow_failure: true

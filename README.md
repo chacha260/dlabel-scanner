@@ -63,3 +63,9 @@ pnpm lint       # oxlint
 Android APK 化したビルドも用意しています（`android/` ディレクトリ、
 `pnpm build:apk`、`.github/workflows/apk.yml`）。ビルド方法・インストール方法・
 実機で確認すべき事項は [`docs/apk.md`](docs/apk.md) を参照してください。
+
+## GitLab で運用する場合
+
+GitHub Actions と同じ内容を `.gitlab-ci.yml` に用意しています。
+社内 GitLab に移せば配信・CI・ソースがすべて社内で完結します。
+注意点は [`docs/gitlab.md`](docs/gitlab.md) を参照してください。
