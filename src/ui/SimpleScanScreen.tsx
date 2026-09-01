@@ -143,10 +143,10 @@ export function SimpleScanScreen() {
   // この画面に実在するオーバーレイは「OCR結果カード」だけ（一覧・確認ダイアログ・
   // プロファイル選択などはこの画面には存在しない）。isAnyOverlayOpen は汎用の
   // 純粋関数のまま流用し、渡すフラグだけを実在するものに絞る。
-  const overlaysOpen = useMemo(
-    () => isAnyOverlayOpen({ ocrResultPanelOpen: capturedImage !== null }),
-    [capturedImage],
-  )
+  // 止めるのは「認識処理中」だけにする。結果カードはカメラ映像の下に並ぶだけで
+  // 視界を塞がないため、表示されている間ずっと検出を止めると
+  // 一度 OCR しただけでバーコードが読めなくなってしまう。
+  const overlaysOpen = useMemo(() => isAnyOverlayOpen({ ocrResultPanelOpen: ocrBusy }), [ocrBusy])
 
   const scanEnabled = useMemo(
     () =>
