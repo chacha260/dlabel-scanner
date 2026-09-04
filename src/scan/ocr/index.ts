@@ -7,13 +7,29 @@ export type { NormalizedRect } from '../barcode/types'
 import { mapCoverRectToVideo } from './geometry'
 import { boxesToMask } from './mask'
 import { preprocessRoi, trimBarcodeBoxesToStripes } from './preprocess'
+import type { OcrPreprocessOptions } from './preprocess'
+import { DEFAULT_OCR_PREPROCESS_OPTIONS } from './preprocess'
+import { recognizeWithMlKit } from './mlkit'
 import type { OcrOptions, OcrResult, RoiRect } from './types'
 
 export { DEFAULT_OCR_OPTIONS } from './types'
-export type { OcrOptions, OcrResult, RoiRect } from './types'
-export { computeOcrScale, OCR_PIXEL_BUDGET, trimBarcodeBoxesToStripes } from './preprocess'
-export { applyOcrFilter, filterAlnumOnly, filterDigitsOnly, OCR_FILTER_LABELS } from './postprocess'
+export type { OcrEngineId, OcrOptions, OcrResult, OcrSymbol, RoiRect } from './types'
+// ML Kit が使えるかどうかの判定だけを通す（実体は mlkit.ts。ブラウザでは常に false）。
+export { isMlKitAvailable } from './mlkit'
+export {
+  computeOcrScale,
+  DEFAULT_OCR_PREPROCESS_OPTIONS,
+  OCR_PIXEL_BUDGET,
+  TARGET_ROI_HEIGHT_PX,
+  trimBarcodeBoxesToStripes,
+} from './preprocess'
+export type { OcrPreprocessOptions } from './preprocess'
+export { applyOcrFilter, correctDigitConfusions, filterAlnumOnly, filterDigitsOnly, OCR_FILTER_LABELS } from './postprocess'
 export type { OcrFilterMode } from './postprocess'
+// 「どの文字が怪しいか」の判定（文字ごとの信頼度 / 2パス照合）。判定は純粋関数として
+// agreement.ts に閉じ込めてあり、ここでは UI から使えるように通すだけ。
+export { compareOcrPasses, judgeByConfidence, LOW_CONFIDENCE_THRESHOLD, mergeVerdicts } from './agreement'
+export type { CharVerdict } from './agreement'
 export { boxesToMask, DEFAULT_MASK_MARGIN, expandRect, normalizedRectToPixels, rectsOverlap } from './mask'
 export type { PixelRect } from './mask'
 export {
@@ -133,7 +149,12 @@ export async function preloadOcr(onProgress?: (progress: OcrProgress) => void): 
 // 実解像度上の範囲（映像座標）へ変換する。object-fit: cover による切り落としを
 // 考慮しないと、画面の枠と実際に切り出される範囲がずれるため、変換は必ずここを通す。
 // maskRects を渡す場合は、映像座標（フレーム全体に対する 0..1）で指定すること。
-export function captureRoi(source: HTMLVideoElement, roi: RoiRect, maskRects?: NormalizedRect[]): ImageData {
+export function captureRoi(
+  source: HTMLVideoElement,
+  roi: RoiRect,
+  maskRects?: NormalizedRect[],
+  preprocessOptions: OcrPreprocessOptions = DEFAULT_OCR_PREPROCESS_OPTIONS,
+): ImageData {
   const videoRoi = mapCoverRectToVideo(
     roi,
     source.clientWidth,
@@ -141,7 +162,7 @@ export function captureRoi(source: HTMLVideoElement, roi: RoiRect, maskRects?: N
     source.videoWidth,
     source.videoHeight,
   )
-  return preprocessRoi(source, videoRoi, maskRects)
+  return preprocessRoi(source, videoRoi, maskRects, preprocessOptions)
 }
 
 // シャッターを押した「その瞬間」の映像全体を同期的に静止画へ落とし込む。
@@ -179,8 +200,80 @@ export function captureFrameAndRoi(video: HTMLVideoElement, roi: RoiRect): Captu
 // 既に映像座標になっている ROI で、静止フレーム（または video 本体）から直接切り出す。
 // captureRoi と違い、表示座標→映像座標の変換は行わない
 // （captureFrameAndRoi で変換済みの videoRoi をそのまま使うためのもの）。
-export function cropVideoSpaceRoi(source: HTMLVideoElement | OffscreenCanvas, videoRoi: RoiRect, maskRects?: NormalizedRect[]): ImageData {
-  return preprocessRoi(source, videoRoi, maskRects)
+export function cropVideoSpaceRoi(
+  source: HTMLVideoElement | OffscreenCanvas,
+  videoRoi: RoiRect,
+  maskRects?: NormalizedRect[],
+  // 前処理の各段（罫線除去・縞マスク・コントラスト正規化）の ON/OFF。
+  // 同じ静止画に対して組み合わせを変えて結果を並べる比較モード（OcrCompareSheet）が
+  // ここを切り替えて呼ぶため、既定値任せにせず明示的に渡せるようにしてある。
+  preprocessOptions: OcrPreprocessOptions = DEFAULT_OCR_PREPROCESS_OPTIONS,
+): ImageData {
+  return preprocessRoi(source, videoRoi, maskRects, preprocessOptions)
+}
+
+/**
+ * ROI（映像座標）を **前処理を一切かけずに、元の解像度・元の色のまま** 切り出す。
+ *
+ * なぜこれが要るのか（重要）:
+ * preprocessRoi のパイプライン（グレースケール化・コントラスト正規化・罫線除去・
+ * そして computeOcrScale による「文字行の高さが TARGET_ROI_HEIGHT_PX=96px に
+ * なるまでの縮小」）は、すべて **tesseract.js の LSTM エンジンに合わせて**
+ * 調整したものである。Tesseract はスキャンした書類向けのエンジンで、
+ * 小さめ・高コントラストのグレースケール画像を好むため、この前処理が効く。
+ *
+ * ところが ML Kit は逆で、**カメラで撮った自然な写真**で学習されている。
+ * 同じ画像を渡すと、
+ *   - 96px まで縮小されたことで細部の情報が失われる
+ *   - グレースケール化・コントラスト伸長で、モデルが期待する画素分布から外れる
+ * という二重の不利を負う。つまり「ML Kit のほうが精度が低い」という比較結果が
+ * 出たとしても、それが **エンジンの実力差なのか、Tesseract 向けの前処理を
+ * 押し付けたせいなのか区別がつかない**。それでは比較する意味がない。
+ *
+ * そのため ML Kit へ渡す経路では、この関数で「切り出しただけ」の画像を作り、
+ * 前処理の有無そのものも比較軸として扱えるようにする。
+ *
+ * maskRects（バーコードのマスク）だけは前処理とは別の話（読ませたくない領域を
+ * 隠すという意図的な操作）なので、渡された場合はここでも塗りつぶす。
+ */
+export function cropVideoSpaceRoiRaw(
+  source: HTMLVideoElement | OffscreenCanvas,
+  videoRoi: RoiRect,
+  maskRects?: NormalizedRect[],
+): ImageData {
+  const frameWidth = source instanceof OffscreenCanvas ? source.width : source.videoWidth
+  const frameHeight = source instanceof OffscreenCanvas ? source.height : source.videoHeight
+
+  const sx = Math.max(0, Math.round(videoRoi.x * frameWidth))
+  const sy = Math.max(0, Math.round(videoRoi.y * frameHeight))
+  const sw = Math.max(1, Math.min(frameWidth - sx, Math.round(videoRoi.w * frameWidth)))
+  const sh = Math.max(1, Math.min(frameHeight - sy, Math.round(videoRoi.h * frameHeight)))
+
+  const canvas = new OffscreenCanvas(sw, sh)
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) {
+    throw new Error('2D context is not available')
+  }
+  // 等倍で切り出すだけ（拡大も縮小もしない。色もそのまま）
+  ctx.drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh)
+
+  if (maskRects && maskRects.length > 0) {
+    // マスクは「読ませたくない領域を隠す」意図的な操作なので前処理とは別扱い。
+    // 前処理経路（preprocess.ts の applyMaskFill）は周囲の色をサンプリングした
+    // グレーで塗るが、ここでは色情報を保ったままにしたいので、素直に
+    // 不透明の中間グレーで塗りつぶす（ML Kit は自然画像を前提とするため、
+    // 真っ黒・真っ白の強いエッジを作らないことのほうが重要）。
+    ctx.fillStyle = 'rgb(128,128,128)'
+    for (const rect of maskRects) {
+      const x = Math.round(rect.x * frameWidth) - sx
+      const y = Math.round(rect.y * frameHeight) - sy
+      const w = Math.round(rect.w * frameWidth)
+      const h = Math.round(rect.h * frameHeight)
+      ctx.fillRect(x, y, w, h)
+    }
+  }
+
+  return ctx.getImageData(0, 0, sw, sh)
 }
 
 // フレームループが持つバーコードリーダーを再利用して、1枚の静止フレームに対して
@@ -215,6 +308,22 @@ export async function recognizeCaptured(
   options: OcrOptions,
   onProgress?: (progress: OcrProgress) => void,
 ): Promise<OcrResult> {
+  // エンジンの振り分けはここ1箇所だけで行う。ML Kit は Capacitor の
+  // ネイティブプラグイン呼び出しであって Web Worker を使わないため、
+  // ワーカーへ postMessage する経路には一切入らせない
+  // （ワーカーを起動すると tesseract 一式の遅延 import が走ってしまい、
+  // ML Kit だけ使いたい端末でも約9MBのエンジンを読み込む羽目になる）。
+  if (options.engine === 'mlkit') {
+    // 進捗の概念が無い（プラグイン呼び出し1回で完結する）ため、
+    // 呼び出し側の進捗表示が固まって見えないよう、開始と完了だけ通知する。
+    onProgress?.({ status: '文字を認識中', progress: 0 })
+    try {
+      return await recognizeWithMlKit(image)
+    } finally {
+      onProgress?.({ status: '文字を認識中', progress: 1 })
+    }
+  }
+
   const worker = ensureWorker()
   const id = nextId++
   if (onProgress) progressListeners.set(id, onProgress)

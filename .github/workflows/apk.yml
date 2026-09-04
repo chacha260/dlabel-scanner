@@ -58,6 +58,31 @@ jobs:
           fi
           echo "path=$APK_PATH" >> "$GITHUB_OUTPUT"
 
+      # このアプリは INTERNET 権限を持たないこと自体を最も強いプライバシー保証に
+      # している。ところが Android のマニフェストマージャは依存ライブラリ（AAR）の
+      # <uses-permission> を最終マニフェストへ自動で合流させるため、ライブラリを
+      # 1つ足しただけで INTERNET が黙って復活し得る（しかもビルドは成功する）。
+      # AndroidManifest.xml 側で tools:node="remove" して剥がしているが、それが
+      # 実際に効いているかは「ビルド成果物を見る」以外に確かめようがない。
+      # ここで実際の APK の権限一覧を検査し、復活していたらビルドを落とす。
+      - name: INTERNET 権限が含まれていないことを確認
+        run: |
+          set -euo pipefail
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -n 1)
+          if [ -z "$AAPT2" ]; then
+            echo "::error::aapt2 が見つからず、権限の検証ができませんでした"
+            exit 1
+          fi
+          echo "使用する aapt2: $AAPT2"
+          PERMS=$("$AAPT2" dump permissions "${{ steps.apk.outputs.path }}")
+          echo "--- APK が要求する権限 ---"
+          echo "$PERMS"
+          if echo "$PERMS" | grep -q 'android.permission.INTERNET'; then
+            echo "::error::APK に INTERNET 権限が含まれています。依存ライブラリのマニフェストから合流した可能性があります（android/app/src/main/AndroidManifest.xml の tools:node=\"remove\" 宣言を確認してください）"
+            exit 1
+          fi
+          echo "OK: INTERNET 権限は含まれていません"
+
       - name: APK サイズをジョブサマリーに表示
         run: |
           echo "### APK 情報" >> "$GITHUB_STEP_SUMMARY"

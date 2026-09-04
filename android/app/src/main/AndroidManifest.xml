@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <application
         android:allowBackup="true"
@@ -54,6 +55,31 @@
         最も強い裏付けとしてこのままにする。
     -->
     <uses-permission android:name="android.permission.CAMERA" />
+
+    <!--
+      INTERNET 権限を「明示的に剥がす」宣言。
+
+      このアプリは INTERNET 権限を持たないこと自体を最も強いプライバシー保証に
+      しているが（上のコメントおよび docs/apk.md の「7. INTERNET 権限について」を参照）、
+      「このアプリのマニフェストに書かない」だけでは不十分である。Android の
+      マニフェストマージャは、依存ライブラリ（AAR）のマニフェストに書かれた
+      <uses-permission> を最終的なアプリのマニフェストへ**自動的に合流させる**ため、
+      ライブラリを1つ足しただけで INTERNET が黙って復活し得る。しかもビルドは
+      成功するので、気付かないまま配布してしまう。
+
+      OCRエンジンとして追加した ML Kit（com.google.mlkit:text-recognition、
+      モデルをビルド時に静的リンクする bundled 版）は、モデルのダウンロードを
+      必要としないため通信は不要のはずだが、ライブラリ側のマニフェストが
+      INTERNET を宣言していないことをドキュメントから確認できなかった。
+      「たぶん宣言していない」に賭けるのではなく、tools:node="remove" で
+      **合流してきても必ず取り除く**ようにしておく。
+
+      加えて、この宣言が実際に効いていることを CI で検証している
+      （.github/workflows/apk.yml の「INTERNET 権限が含まれていないことを確認」）。
+      マージ後のマニフェストを実際に検査するので、将来どのライブラリを足しても
+      権限が静かに復活すれば必ずビルドが落ちる。
+    -->
+    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
     <uses-feature
         android:name="android.hardware.camera"
         android:required="true" />

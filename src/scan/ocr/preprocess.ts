@@ -12,8 +12,9 @@
 // 二値化とは別物である。
 
 import type { NormalizedRect } from '../barcode/types'
+import { computeInnerCrop, detectRuledLines, inpaintRuledLines } from './lines'
 import { normalizedRectToPixels } from './mask'
-import { countTransitions, findDenseBand } from './stripes'
+import { countRowTransitions, detectStripeRegion, findDenseBand, luma } from './stripes'
 import type { RoiRect } from './types'
 
 // ROI の切り出し元。ライブの <video> だけでなく、シャッター押下時に captureFrame() で
@@ -284,11 +285,6 @@ export function normalizeContrast(gray: Uint8ClampedArray): Uint8ClampedArray {
   return out
 }
 
-// crop 内の輝度（luma）を返す（マスクの塗りつぶし色をサンプリングするための小さなヘルパー）
-function luma(data: Uint8ClampedArray, offset: number): number {
-  return 0.299 * data[offset] + 0.587 * data[offset + 1] + 0.114 * data[offset + 2]
-}
-
 // ROI 切り出し画像の外周（=ラベルの地の色である可能性が高い部分）をサンプリングして、
 // バーコード枠を塗りつぶすためのグレー値を求める。純粋な黒・白で塗ると Tesseract に
 // とって不自然に強いエッジになりかねないため、周囲に馴染む中間的な明るさを使う。
@@ -339,43 +335,58 @@ function applyMaskFill(
     const y1 = Math.min(sh, framePx.y + framePx.h - cropY)
     if (x1 <= x0 || y1 <= y0) continue // ROI と交差しない枠は何もしない
 
-    for (let y = y0; y < y1; y++) {
-      const rowOffset = (y * sw) * 4
-      for (let x = x0; x < x1; x++) {
-        const o = rowOffset + x * 4
-        data[o] = fill
-        data[o + 1] = fill
-        data[o + 2] = fill
-        // アルファはそのまま（常に不透明で描画しているため 255 のまま）
-      }
+    fillRectGray(data, sw, x0, y0, x1, y1, fill)
+  }
+}
+
+// [x0, x1) × [y0, y1) の矩形（ローカルピクセル座標、半開区間）をグレー値 fill で
+// 塗りつぶす小さなヘルパー。applyMaskFill（デコード済みバーコード枠の塗りつぶし）と
+// applyStripeRegionMask（下記、ROI 全体スキャンでの塗りつぶし）の両方から使う。
+function fillRectGray(data: Uint8ClampedArray, sw: number, x0: number, y0: number, x1: number, y1: number, fill: number): void {
+  for (let y = y0; y < y1; y++) {
+    const rowOffset = y * sw * 4
+    for (let x = x0; x < x1; x++) {
+      const o = rowOffset + x * 4
+      data[o] = fill
+      data[o + 1] = fill
+      data[o + 2] = fill
+      // アルファはそのまま（常に不透明で描画しているため 255 のまま）
     }
   }
 }
 
-// 走査線ごとのヒステリシスしきい値を、その行自身の輝度レンジから求めるための係数。
-// 中央値 ±（レンジの10%）を「不感帯」とする。値が大きいほどノイズに強くなる代わりに、
-// コントラストの低いかすれたバーを見逃しやすくなる。
-const HYSTERESIS_BAND_RATIO = 0.1
+/**
+ * ROI 全体（デコードの成否と無関係）をスキャンして、縞（バーコード）が密集している
+ * 領域を検出し、周囲の色で塗りつぶす。
+ *
+ * 既存の trimBarcodeBoxesToStripes / applyMaskFill は「BarcodeDetector がデコード
+ * できた枠」の内側しか見ないため、ROI の端で切れてデコードできなかったバーコードは
+ * 素通りしてしまう（これが取りこぼしの主因）。この関数はデコード結果を一切使わず、
+ * ROI の画素そのものから stripes.ts の detectStripeRegion で縞を探すため、そのような
+ * ケースにも対応できる。既存のデコード済み枠の塗りつぶし（applyMaskFill）を置き換える
+ * ものではなく、それに加えて働く保険として使う。
+ *
+ * detectStripeRegion が矩形（cols あり = 2次元シンボル相当）を返した場合はその矩形だけ、
+ * 帯（cols なし = 1次元バーコード相当）を返した場合は幅いっぱいの帯を塗りつぶす。
+ */
+function applyStripeRegionMask(data: Uint8ClampedArray, sw: number, sh: number): void {
+  if (sw <= 0 || sh <= 0) return
 
-// 1行分の輝度（luma）を取り出し、その場でヒステリシス反転回数を数える。
-// 行ごとに min/max からしきい値を作り直すのは、ROI 内の明るさムラ（影・照明）に
-// 左右されず、どの行でも「その行なりのコントラスト」で判定するため。
-function countRowTransitions(data: Uint8ClampedArray, rowOffsetPx: number, w: number, rowLuma: Uint8ClampedArray): number {
-  let min = 255
-  let max = 0
-  for (let x = 0; x < w; x++) {
-    const o = (rowOffsetPx + x) * 4
-    const v = luma(data, o)
-    rowLuma[x] = v
-    if (v < min) min = v
-    if (v > max) max = v
-  }
-  const mid = (min + max) / 2
-  const span = max - min
-  const low = mid - span * HYSTERESIS_BAND_RATIO
-  const high = mid + span * HYSTERESIS_BAND_RATIO
-  return countTransitions(rowLuma, low, high)
+  const region = detectStripeRegion(data, sw, sh)
+  if (!region) return
+
+  const fill = sampleFillGray(data, sw, sh)
+  const y0 = region.rows.start
+  const y1 = region.rows.end + 1
+  const x0 = region.cols ? region.cols.start : 0
+  const x1 = region.cols ? region.cols.end + 1 : sw
+  fillRectGray(data, sw, x0, y0, x1, y1, fill)
 }
+
+// countRowTransitions（走査線ごとのヒステリシス反転回数カウント）は、以前はここに
+// 直接定義されていたが、stripes.ts の detectStripeRegion（ROI 全体スキャンによる
+// デコーダ非依存の縞マスク、下記 applyStripeRegionMask を参照）でも同じロジックが
+// 必要になったため stripes.ts 側へ切り出した。ここでは import して使うだけにする。
 
 /**
  * 検出済みバーコード枠（映像座標、0..1）を、実際に縞（バー）が密集している行の帯まで
@@ -448,6 +459,56 @@ function trimOneBoxToStripeBand(
   }
 }
 
+// RGBA データをグレースケール（輝度＝ luma）配列に変換する。二値化はしない
+// （本ファイル冒頭の方針、および luma の定義は stripes.ts を参照）。
+function toGrayscale(data: Uint8ClampedArray, sw: number, sh: number): Uint8ClampedArray {
+  const pixelCount = sw * sh
+  const gray = new Uint8ClampedArray(pixelCount)
+  for (let i = 0; i < pixelCount; i++) {
+    const o = i * 4
+    gray[i] = Math.round(luma(data, o))
+  }
+  return gray
+}
+
+// グレースケール配列の一部矩形だけを新しい配列として切り出す。
+// lines.ts の computeInnerCrop が返す CropRect（ローカルピクセル座標）を
+// そのまま適用するために使う（1-C: 罫線を避けた内側詰め）。
+function cropGray(gray: Uint8ClampedArray, sw: number, rect: { x: number; y: number; w: number; h: number }): Uint8ClampedArray {
+  const out = new Uint8ClampedArray(rect.w * rect.h)
+  for (let y = 0; y < rect.h; y++) {
+    const srcOffset = (rect.y + y) * sw + rect.x
+    const dstOffset = y * rect.w
+    for (let x = 0; x < rect.w; x++) {
+      out[dstOffset + x] = gray[srcOffset + x]
+    }
+  }
+  return out
+}
+
+/**
+ * preprocessRoi の各段を個別に ON/OFF するためのオプション。
+ *
+ * アプリ側に「同じ静止画に対して前処理の組み合わせを変えて結果を並べる比較モード」を
+ * 作る要件があり、各段が互いに独立して切れることが必須のため、フラグは1段1個で
+ * まとめず分けてある（例えば「罫線除去とコントラスト正規化を両方OFF、縞マスクだけ
+ * ON」のような組み合わせも成立する）。
+ */
+export type OcrPreprocessOptions = {
+  /** 罫線（枠線）を検出して除去するか。ON のとき、内側詰め（1-C）も合わせて行う。 */
+  removeRuledLines: boolean
+  /** ROI全体から縞（バーコード）を検出してマスクするか。デコード可否によらない */
+  maskStripes: boolean
+  /** コントラスト正規化を行うか（既存 normalizeContrast の ON/OFF） */
+  normalizeContrast: boolean
+}
+
+export const DEFAULT_OCR_PREPROCESS_OPTIONS: OcrPreprocessOptions = {
+  removeRuledLines: true,
+  maskStripes: true,
+  normalizeContrast: true,
+}
+
 /**
  * ROI（映像座標、0..1）を source から切り出し、グレースケール化・スケーリングまで行う。
  *
@@ -455,8 +516,40 @@ function trimOneBoxToStripeBand(
  * 周囲の色で塗りつぶしてからグレースケール化する。バーコードのストライプが ROI に
  * 写り込んで OCR の邪魔になるのを防ぐための仕組み（呼び出し側は mask.ts の
  * boxesToMask で ROI と重なる検出済みバーコード枠だけに絞り込んでから渡す）。
+ *
+ * options（省略時 DEFAULT_OCR_PREPROCESS_OPTIONS）で各段を個別に無効化できる。
+ *
+ * パイプラインの順序（なぜこの順かは各ステップのコメントも参照）:
+ *   1. 切り出し（crop）
+ *   2. マスク塗り（デコード済みバーコード枠 maskRects → ROI全体スキャンの縞マスク）
+ *   3. グレースケール化
+ *   4. コントラスト正規化
+ *   5. 罫線検出 → 内側詰め（1-C）→ 罫線除去（線形インペイント）
+ *   6. スケーリング（拡大/縮小）
+ *
+ * 1→2→3 の順は元からの既存挙動（マスクは色情報が残っているRGBA段階で行う必要があり、
+ * グレースケール化より前）をそのまま維持している。
+ *
+ * 4（コントラスト正規化）を 5（罫線除去）より先に行っているのが今回の判断のポイント。
+ * lines.ts の罫線判定は固定の絶対輝度しきい値（RULED_LINE_DARK_THRESHOLD）を使う。
+ * 倉庫・工場フロアの照明ムラで ROI 全体が暗く沈んでいると、本来の罫線がこの
+ * 固定しきい値に届かず検出漏れする恐れがある。先にコントラストを標準的なレンジまで
+ * 引き伸ばしてから固定しきい値で判定した方が、照明条件によるばらつきをある程度
+ * 吸収でき、しきい値の意味が安定する。逆に「二値化はしない」という方針（ファイル冒頭）
+ * との整合も保てる: normalizeContrast はあくまで線形変換であり、罫線除去用の判定
+ * だけがそれを参照する形なら、Tesseract に渡す最終画像の性質を変えるものではない。
+ *
+ * 5（罫線除去）は必ず 6（スケーリング）より前に行う。罫線の太さはたかだか数pxしか
+ * なく、リサンプリング（特に拡大の双線形補間・縮小のボックスフィルタ）でぼやけると
+ * 「暗画素が長く連続する」という判定根拠自体が薄まって検出できなくなるため、
+ * 必ず元解像度のグレースケール画像に対して行う。
  */
-export function preprocessRoi(source: FrameSource, roi: RoiRect, maskRects?: NormalizedRect[]): ImageData {
+export function preprocessRoi(
+  source: FrameSource,
+  roi: RoiRect,
+  maskRects?: NormalizedRect[],
+  options: OcrPreprocessOptions = DEFAULT_OCR_PREPROCESS_OPTIONS,
+): ImageData {
   const { width: frameWidth, height: frameHeight } = frameSize(source)
 
   const sx = Math.max(0, Math.round(roi.x * frameWidth))
@@ -473,23 +566,59 @@ export function preprocessRoi(source: FrameSource, roi: RoiRect, maskRects?: Nor
     applyMaskFill(data, sw, sh, maskRects, frameWidth, frameHeight, sx, sy)
   }
 
-  // グレースケール化（輝度＝ luma）。二値化はしない。
-  const pixelCount = sw * sh
-  const gray = new Uint8ClampedArray(pixelCount)
-  for (let i = 0; i < pixelCount; i++) {
-    const o = i * 4
-    gray[i] = Math.round(0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2])
+  // デコーダ非依存の縞マスク（1-B）。デコードできた枠の塗りつぶし（上記）とは独立に、
+  // ROI 全体を見て縞の密集領域を追加で塗りつぶす。
+  if (options.maskStripes) {
+    applyStripeRegionMask(data, sw, sh)
   }
 
-  // コントラスト正規化はグレースケール化の後・スケーリングの前に行う。
-  // スケーリング後（特に拡大の双線形補間後）に行うと、補間によってなまった
-  // エッジの輝度差がストレッチの対象になってしまい、ROI 本来のコントラストを
-  // 正しく評価できなくなるため、必ず元の解像度のグレースケール画像に対して行う。
-  const normalized = normalizeContrast(gray)
+  // グレースケール化（輝度＝ luma）。二値化はしない。
+  let gray = toGrayscale(data, sw, sh)
 
-  const scale = computeOcrScale(sw, sh)
+  // コントラスト正規化を罫線除去より先に行う理由は関数コメントを参照。
+  if (options.normalizeContrast) {
+    gray = normalizeContrast(gray)
+  }
+
+  // 罫線検出・内側詰め・除去の結果、切り出しサイズが変わりうるため、以降は
+  // sw/sh ではなく effectiveW/effectiveH を使う。
+  let effectiveW = sw
+  let effectiveH = sh
+
+  if (options.removeRuledLines) {
+    const detected = detectRuledLines(gray, effectiveW, effectiveH)
+    const rowIndices = detected.rows.map((r) => r.index)
+    const colIndices = detected.cols.map((c) => c.index)
+
+    // 1-C: 罫線に接するROI外周を、内側の安全な矩形へ詰める（消すより避ける）。
+    const inner = computeInnerCrop(effectiveW, effectiveH, rowIndices, colIndices)
+    const wasCropped = inner.x > 0 || inner.y > 0 || inner.w < effectiveW || inner.h < effectiveH
+
+    if (wasCropped) {
+      gray = cropGray(gray, effectiveW, inner)
+      effectiveW = inner.w
+      effectiveH = inner.h
+
+      // 詰めた後の矩形に対して、内部に残っている罫線（表の行区切り線など）が
+      // ないか検出し直す。クロップで座標系がずれるため、検出済みインデックスを
+      // 平行移動して使い回すより、小さくなった配列に対して単純に再検出する方が
+      // 実装が単純で座標変換ミスの事故が少ないと判断した。
+      const reDetected = detectRuledLines(gray, effectiveW, effectiveH)
+      gray = inpaintRuledLines(
+        gray,
+        effectiveW,
+        effectiveH,
+        reDetected.rows.map((r) => r.index),
+        reDetected.cols.map((c) => c.index),
+      )
+    } else {
+      gray = inpaintRuledLines(gray, effectiveW, effectiveH, rowIndices, colIndices)
+    }
+  }
+
+  const scale = computeOcrScale(effectiveW, effectiveH)
 
   return scale >= 1
-    ? resampleUpscale(normalized, sw, sh, scale)
-    : resampleDownscale(normalized, sw, sh, scale)
+    ? resampleUpscale(gray, effectiveW, effectiveH, scale)
+    : resampleDownscale(gray, effectiveW, effectiveH, scale)
 }

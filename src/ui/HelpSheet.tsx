@@ -295,6 +295,65 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             </ButtonRef>
             を押します。初回だけ文字認識エンジン（約9MB）のダウンロードが走りますが、一度ダウンロードすればそれ以降は電波が無い場所でもそのまま使えます。
           </p>
+          <p>
+            結果カードには、読み取り結果のほかにこのアプリで唯一の設定がまとまっています。
+            <strong className="text-slate-100">実物の現品票を読ませてみながら調整してください。</strong>
+          </p>
+          <ul className="list-disc space-y-1.5 pl-5">
+            <li>
+              <strong className="text-slate-100">エンジン</strong>
+              （既定は<ButtonRef>Tesseract</ButtonRef>）: 文字認識のしくみを切り替えます。
+              <ButtonRef>ML Kit</ButtonRef>
+              は
+              <strong className="text-amber-300">Androidアプリ（APK）版でのみ選べます。</strong>
+              ブラウザ（このページをそのまま開いている場合）ではボタンが押せない状態になり、その旨の説明が添えられます。
+              どちらが実際のラベルでよく読めるかはまだ分かっていないため、両方試して比べられるようにしてあります。
+            </li>
+            <li>
+              <strong className="text-slate-100">丁寧に読む</strong>
+              （既定はOFF）: ONにすると、同じ画像をもう一度別のPSM（読み取りモード）で読み直し、2回の結果を突き合わせます。
+              <strong className="text-amber-300">認識にかかる時間が約2倍になります</strong>
+              が、2回の結果が食い違った文字を次に説明する「怪しい文字」として見つけやすくなります。
+              <ButtonRef>ML Kit</ButtonRef>
+              を選んでいるときは、PSMという設定自体が無いため2パス目に意味が無く、このトグルは表示されません。
+            </li>
+          </ul>
+        </Section>
+
+        <Section title="怪しい文字の強調と手直し">
+          <p>
+            結果カードの<strong className="text-slate-100">「生の読み取り結果」</strong>
+            では、読み間違えている可能性がある文字だけ
+            <span className="mx-1 rounded bg-amber-500/30 px-1.5 py-0.5 font-mono text-amber-200">黄色</span>
+            で表示されます。判定の根拠は次の2つで、どちらか一方でも怪しいと言っていれば黄色になります。
+          </p>
+          <ul className="list-disc space-y-1.5 pl-5">
+            <li>エンジンがその文字の認識に自信を持てていない（文字ごとの信頼度が低い）</li>
+            <li>
+              <ButtonRef>丁寧に読む</ButtonRef>
+              がONのとき、2回の読み取り結果がその文字で食い違った
+            </li>
+          </ul>
+          <p>
+            黄色い文字は
+            <strong className="text-slate-100">タップすると、見分けにくい別の字形（例:</strong>
+            <span className="mx-1 font-mono text-slate-100">1↔I</span>
+            <span className="mx-1 font-mono text-slate-100">0↔O</span>
+            <span className="mx-1 font-mono text-slate-100">5↔S</span>
+            <span className="mx-1 font-mono text-slate-100">8↔B</span>
+            など）
+            <strong className="text-slate-100">に切り替えられます。</strong>
+            もう一度タップすれば元に戻ります。直した内容は、結果一覧に積まれたその行の値・コピーする値にそのまま反映されます。
+          </p>
+          <p>
+            <strong className="text-slate-100">エンジンが実際に返した文字そのもの（生テキスト）は、直した後も変わらず表示され続けます。</strong>
+            何を直したのかが後から分からなくならないよう、このアプリでは生の認識結果を隠すことは一切ありません。
+          </p>
+          <p>
+            判定の材料（信頼度・2回目の読み取り）が無い場合は、
+            <strong className="text-slate-100">何も強調せず普通の文字として表示します。</strong>
+            「情報が無いこと」を「全部怪しいこと」として見せると、かえって信用できる情報を減らしてしまうためです。
+          </p>
         </Section>
 
         <Section title="読み取った画像の見かた">
@@ -307,6 +366,32 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             PSM（読み取りモード）やバーコード除外の設定を変えたときは、
             <ButtonRef>同じ画像で再認識</ButtonRef>
             を押せば、もう一度狙い直さずに、今の画像のまま読み直せます。抽出フィルタの切り替えだけは読み取り済みの結果を絞り込むだけなので、押さなくても表示がすぐに変わります。
+          </p>
+        </Section>
+
+        <Section title="OCR設定の比較モード">
+          <div className="flex gap-2.5 rounded-lg border border-amber-500/50 bg-amber-950/40 p-3.5">
+            <WarningIcon className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
+            <p className="leading-relaxed text-amber-200">
+              このアプリには、OCRの精度を数値で測る手段がありません。実物の現品票の画像も正解データも手元に無いためです。
+              これまでの前処理の調整はすべて「良くなった気がする」という推論だけで積み重ねてきました。
+              <strong className="text-slate-100">この比較モードは、その代わりに現場で実物を使って目で見比べ、判断してもらうための機能です。</strong>
+            </p>
+          </div>
+          <p>
+            結果カードの
+            <ButtonRef>設定を比較</ButtonRef>
+            （読み取り結果が出ているときだけ表示されます）を押すと、
+            <strong className="text-slate-100">撮り直しはせず、いま撮った同じ1枚の画像</strong>
+            に対して、PSMや前処理（罫線除去・バーコードの縞マスク・コントラスト正規化）の組み合わせをいくつも変えながらまとめて読み取り直し、結果を並べて見比べられます。
+          </p>
+          <p>
+            <strong className="text-amber-300">
+              どの結果が「正解」かはアプリには判定できません。正解が分かるのは、実物のラベルを見ているあなただけです。
+            </strong>
+            並んだ結果を見比べて、一番よく読めている設定の
+            <strong className="text-slate-100">「この設定を使う」</strong>
+            を押してください。押した設定（PSM・前処理の組み合わせ）はこのアプリに記憶され、以降のシャッターすべてに使われます。
           </p>
         </Section>
 

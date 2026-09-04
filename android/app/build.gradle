@@ -7,8 +7,11 @@ android {
         applicationId "jp.local.dlabelscanner"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        // リリースタグ v1.1.0 に対応。サイドロードで入れ替える運用のため、
+        // 端末の「設定 → アプリ」でどちらのビルドが入っているか判別できるよう、
+        // リリースのたびに必ず versionCode と versionName の両方を上げること。
+        versionCode 2
+        versionName "1.1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -28,6 +31,36 @@ repositories {
     flatDir{
         dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
     }
+}
+
+// ML Kit の文字認識モデルのうち、使わないスクリプトを APK から除外する。
+//
+// 経緯: @capacitor-mlkit/text-recognition は、その build.gradle で
+// com.google.mlkit:text-recognition{,-chinese,-devanagari,-japanese,-korean} の
+// **5種類すべて**を implementation 依存に持っている。これらは「bundled」構成の
+// ML Kit モデル（ビルド時にアプリへ静的リンクされ、実行時のダウンロードが不要。
+// この APK が INTERNET 権限なしで OCR できる理由）であり、1スクリプトあたり
+// 約4MB ある。つまり何もしないと、使いもしない4スクリプトぶんで
+// **APK が約16MB 太る**。
+//
+// このアプリが現品票から読み取るのは「ほぼ数字、一部に - と +」だけであり、
+// 必要なのは Latin だけなので、残り4つを除外する。
+//
+// 【安全性について / これが原因で落ちた場合の対処】
+// プラグインの Java 側（TextRecognition.java の createRecognizerOptionsForScript）は
+// script 名の switch 文の各分岐の中でのみ各スクリプトのクラスを new しており、
+// JS 側からは Script.Latin しか指定しない（src/scan/ocr/mlkit.ts を参照）ため、
+// 除外したクラスに触れる分岐は実行されない。ART のクラス検証は遅延・ソフトフェイル
+// するため、通常はこれで問題なく動作する。
+// ただし **この開発環境には実機も Android SDK も無く、実際に検証できていない**。
+// 万一 OCR 実行時に NoClassDefFoundError で落ちる場合は、下の configurations.all
+// ブロックを丸ごとコメントアウトすれば元に戻る（APK は約16MB 増えるが動作する）。
+// 実機確認の必須項目として docs/apk.md のチェックリストにも記載している。
+configurations.all {
+    exclude group: 'com.google.mlkit', module: 'text-recognition-chinese'
+    exclude group: 'com.google.mlkit', module: 'text-recognition-devanagari'
+    exclude group: 'com.google.mlkit', module: 'text-recognition-japanese'
+    exclude group: 'com.google.mlkit', module: 'text-recognition-korean'
 }
 
 dependencies {

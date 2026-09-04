@@ -2,6 +2,9 @@
 // 毎回操作し直すのが煩わしい表示・操作の設定だけは localStorage に残す。
 
 import type { CaptureQuality } from '../camera/quality'
+import type { OcrFilterMode } from '../scan/ocr/postprocess'
+import type { OcrEngineId, OcrOptions } from '../scan/ocr/types'
+import { DEFAULT_OCR_PREPROCESS_OPTIONS, type OcrPreprocessOptions } from '../scan/ocr/preprocess'
 import type { BarcodeTriggerMode, ScanMode } from '../scan/scanGating'
 import { DEFAULT_BARCODE_TRIGGER_MODE } from '../scan/scanGating'
 import { DEFAULT_TRIM_RULES, type TrimRules } from '../scan/barcode/trim'
@@ -51,6 +54,151 @@ export function loadBarcodeTriggerMode(): BarcodeTriggerMode {
 export function saveBarcodeTriggerMode(mode: BarcodeTriggerMode): void {
   try {
     localStorage.setItem(BARCODE_TRIGGER_MODE_STORAGE_KEY, mode)
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
+
+const OCR_PSM_STORAGE_KEY = 'dlabel.ocrPsm'
+
+/**
+ * OCR の PSM（Page Segmentation Mode）。これまで結果カード上の選択は保存されず、
+ * シャッターのたびに既定の「単一行」へ戻っていた。現場では読む対象の形（1行の品番か、
+ * 複数行のブロックか）はほぼ固定なので、毎回選び直させる理由がない。
+ * 保存値が無い・壊れている場合は従来の既定である '7'（単一行）とする。
+ */
+export function loadOcrPsm(): OcrOptions['psm'] {
+  try {
+    const raw = localStorage.getItem(OCR_PSM_STORAGE_KEY)
+    return raw === '8' || raw === '6' ? raw : '7'
+  } catch {
+    return '7'
+  }
+}
+
+export function saveOcrPsm(psm: OcrOptions['psm']): void {
+  try {
+    localStorage.setItem(OCR_PSM_STORAGE_KEY, psm)
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
+
+const OCR_FILTER_MODE_STORAGE_KEY = 'dlabel.ocrFilterMode'
+
+/**
+ * OCR結果の抽出フィルタ。PSM と同じ理由で永続化する。
+ * 保存値が無い・壊れている場合は従来の既定である 'raw'（フィルタなし）とする。
+ */
+export function loadOcrFilterMode(): OcrFilterMode {
+  try {
+    const raw = localStorage.getItem(OCR_FILTER_MODE_STORAGE_KEY)
+    if (raw === 'digits' || raw === 'alnum' || raw === 'digitsFixed') return raw
+    return 'raw'
+  } catch {
+    return 'raw'
+  }
+}
+
+export function saveOcrFilterMode(mode: OcrFilterMode): void {
+  try {
+    localStorage.setItem(OCR_FILTER_MODE_STORAGE_KEY, mode)
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
+
+const OCR_CAREFUL_STORAGE_KEY = 'dlabel.ocrCareful'
+
+/**
+ * 「丁寧に読む」モード。ON のとき PSM を変えて2回認識し、文字単位で突き合わせて
+ * 一致しなかった位置を「怪しい」として強調する。認識時間が約2倍になるため
+ * 既定は OFF（従来どおりの1パス）とし、読みにくいラベルのときだけ使ってもらう。
+ */
+export function loadOcrCareful(): boolean {
+  try {
+    return localStorage.getItem(OCR_CAREFUL_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+export function saveOcrCareful(enabled: boolean): void {
+  try {
+    localStorage.setItem(OCR_CAREFUL_STORAGE_KEY, String(enabled))
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
+
+const OCR_ENGINE_STORAGE_KEY = 'dlabel.ocrEngine'
+
+/**
+ * OCRエンジンの選択（Tesseract / ML Kit）。保存値が無い・壊れている場合は
+ * 'tesseract' を既定とする（ブラウザでも APK でも動く唯一のエンジンであり、
+ * これまでの唯一の挙動だったため）。
+ *
+ * 注意: ここでは保存値をそのまま返すだけで、「今の実行環境で ML Kit が実際に
+ * 使えるか」の検証はしない（isMlKitAvailable() は Capacitor 依存であり、
+ * localStorage の読み書きだけを扱うこのファイルに持ち込みたくないため）。
+ * 別端末で 'mlkit' を選んで保存した設定が、ML Kit の無いブラウザや端末に
+ * そのまま同期されてくることがあるので、呼び出し側（SimpleScanScreen.tsx）で
+ * isMlKitAvailable() を見て 'tesseract' にフォールバックすること。
+ */
+export function loadOcrEngine(): OcrEngineId {
+  try {
+    const raw = localStorage.getItem(OCR_ENGINE_STORAGE_KEY)
+    return raw === 'mlkit' ? 'mlkit' : 'tesseract'
+  } catch {
+    // プライベートブラウジング等で読めなくても既定値（tesseract）で動作させる
+    return 'tesseract'
+  }
+}
+
+export function saveOcrEngine(engine: OcrEngineId): void {
+  try {
+    localStorage.setItem(OCR_ENGINE_STORAGE_KEY, engine)
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
+
+const OCR_PREPROCESS_STORAGE_KEY = 'dlabel.ocrPreprocess'
+
+// 保存値の形を信用せず、OcrPreprocessOptions として妥当な形かどうかを1フィールドずつ
+// 確かめる（isValidTrimRules と同じ流儀。他バージョンのアプリや手動編集で
+// 壊れている可能性があるため）。
+function isValidOcrPreprocessOptions(value: unknown): value is OcrPreprocessOptions {
+  if (value === null || typeof value !== 'object') return false
+  const v = value as Record<string, unknown>
+  return (
+    typeof v.removeRuledLines === 'boolean' &&
+    typeof v.maskStripes === 'boolean' &&
+    typeof v.normalizeContrast === 'boolean'
+  )
+}
+
+/**
+ * OCR前処理（罫線除去・縞マスク・コントラスト正規化）の各段ON/OFF。比較モード
+ * （OcrCompareSheet）で「この設定を使う」を選んだ組み合わせを、次回のシャッターにも
+ * 引き継ぐために永続化する。保存値が無い・壊れている場合は
+ * DEFAULT_OCR_PREPROCESS_OPTIONS（すべてON、従来からの唯一の挙動）にフォールバックする。
+ */
+export function loadOcrPreprocess(): OcrPreprocessOptions {
+  try {
+    const raw = localStorage.getItem(OCR_PREPROCESS_STORAGE_KEY)
+    if (raw === null) return DEFAULT_OCR_PREPROCESS_OPTIONS
+    const parsed: unknown = JSON.parse(raw)
+    return isValidOcrPreprocessOptions(parsed) ? parsed : DEFAULT_OCR_PREPROCESS_OPTIONS
+  } catch {
+    // プライベートブラウジング等で読めない・壊れている場合は既定値（すべてON）で動作させる
+    return DEFAULT_OCR_PREPROCESS_OPTIONS
+  }
+}
+
+export function saveOcrPreprocess(options: OcrPreprocessOptions): void {
+  try {
+    localStorage.setItem(OCR_PREPROCESS_STORAGE_KEY, JSON.stringify(options))
   } catch {
     // 保存できなくても致命的ではないため無視する
   }

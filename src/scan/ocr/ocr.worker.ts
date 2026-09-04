@@ -68,6 +68,13 @@ function resolveCoreFileName(): string {
 
 let tesseractWorkerPromise: Promise<TesseractWorker> | null = null
 let appliedPsm: OcrOptions['psm'] | null = null
+// user_defined_dpi は認識のたびに変える値ではなく、worker の生存期間中に一度
+// 設定すれば十分な値。以前の applyOptionsIfChanged は「appliedPsm が変化した
+// ときだけ setParameters する」実装だったため、もしこのフラグを appliedPsm と
+// 同じ仕組みに乗せてしまうと、2回目以降の呼び出し（psm が変わらない限り）で
+// 早期 return されて一生 setParameters に載らない、という事故になる。
+// そのため psm とは別の「一度だけ適用したか」を表すフラグを独立して持つ。
+let appliedOnceParams = false
 
 // getTesseractWorker() の初期化失敗を、現場で原因を切り分けられる日本語メッセージに
 // 包み直す。このワーカーの初期化で失敗しうる工程（worker.min.js の取得、wasm コアの
@@ -151,6 +158,25 @@ async function getTesseractWorker(): Promise<TesseractWorker> {
         // 最終的な APK サイズへの寄与はほぼ同じで、二重圧縮という不具合の芽だけが消える。
         gzip: false,
         logger: handleLoggerEvent,
+      }, {
+        // 品番・数量は英単語ではないため、tesseract 内蔵の英語辞書
+        // （DAWG: Directed Acyclic Word Graph）による補正は誤爆の原因にしかならない。
+        // 例えば "12345" のような数字列が辞書上の類似語に引っ張られて綴りごと
+        // 変えられてしまう、といった事故を防ぐために全て無効化する。
+        //
+        // これらは Tesseract 本体（native側）の初期化時にしか読めない
+        // init-only なパラメータで、setParameters（実行のたびに変更できる
+        // パラメータ）では効かない。tesseract.js の createWorker() は
+        // (langs, oem, options, config) の4引数を取り、config が
+        // initialize アクション（worker 初期化時に1回だけ native 側へ渡される）
+        // に渡る値になる（node_modules/tesseract.js/src/createWorker.js の
+        // initializeInternal 呼び出しと、型定義 index.d.ts の
+        // `createWorker(langs?, oem?, options?, config?: Partial<InitOptions>)`
+        // で実際に確認した）。第3引数の options（workerPath/corePath/langPath等の
+        // JS側設定）とは渡る先も渡るタイミングも異なるため混同しないこと。
+        load_system_dawg: '0',
+        load_freq_dawg: '0',
+        load_number_dawg: '0',
       })
     })().catch((err: unknown) => {
       // 初期化に失敗した Promise をキャッシュに残すと、原因（.gz 展開の失敗など）が
@@ -164,13 +190,27 @@ async function getTesseractWorker(): Promise<TesseractWorker> {
 }
 
 async function applyOptionsIfChanged(worker: TesseractWorker, options: OcrOptions): Promise<void> {
-  if (appliedPsm === options.psm) return
+  // psm が変わっていなくても、まだ一度も setParameters を呼んでいなければ
+  // （＝ user_defined_dpi 等の「一度だけ設定すればよい値」が未適用のままなら）
+  // 必ず1回は setParameters を通す。psm の変化だけを条件にした早期 return では、
+  // 2回目以降の認識（psm 不変）が永久にこの関数を素通りしてしまい、
+  // user_defined_dpi が一生設定されないという構造上の不具合になるため。
+  if (appliedPsm === options.psm && appliedOnceParams) return
 
   const params: SetParametersArg = {
     tessedit_pageseg_mode: options.psm as unknown as SetParametersArg['tessedit_pageseg_mode'],
+    // Tesseract は画像の解像度（DPI）を自前で推定してから文字サイズ等の
+    // 判定に使うが、スマホカメラで撮った現品票の画像は EXIF や実寸と
+    // 無関係な解像度になりがちで、この自動推定がブレて認識精度に
+    // 悪影響を与えることがある。撮影→前処理（preprocess.ts）を経て
+    // ここに来る画像は印刷物を等倍〜数倍にスケールした程度のものなので、
+    // 一般的な印刷解像度に近い 300 を固定値として渡し、推定のブレそのものを
+    // 起こさないようにする。
+    user_defined_dpi: '300',
   }
   await worker.setParameters(params)
   appliedPsm = options.psm
+  appliedOnceParams = true
 }
 
 async function handleRecognize(request: RecognizeRequest): Promise<void> {
@@ -188,11 +228,42 @@ async function handleRecognize(request: RecognizeRequest): Promise<void> {
     }
     ctx.putImageData(request.imageData, 0, 0)
 
-    const { data } = await worker.recognize(canvas)
+    // 第3引数の output で { blocks: true } を指定すると、data.blocks に
+    // blocks[] → paragraphs[] → lines[] → words[] → symbols[] という階層で
+    // 文字単位の認識結果（Word.symbols[] の text/confidence）が入ってくる。
+    // 既定（省略時）は blocks: false で data.blocks が常に null になり、
+    // 文字ごとの信頼度が一切取れない
+    // （node_modules/tesseract.js/src/worker-script/constants/defaultOutput.js）。
+    // output は「どの形式で結果を返すか」の指定であり、認識処理そのもの
+    // （画像→文字列の推論）を変えるものではないはずだが、その根拠は
+    // tesseract.js のドキュメント上の説明に基づく。ここでは実際に日本語の
+    // 現品票画像で text/confidence が output 指定の有無で変わらないことは
+    // 確認していないため、もし将来 text の内容や confidence の値が
+    // output 指定の前後で変わるようなら、まずここを疑うこと。
+    const { data } = await worker.recognize(canvas, {}, { blocks: true })
+
+    // data.blocks は環境やタイミングによっては null になり得る
+    // （tesseract.js の既知の挙動。詳細は types.ts の OcrSymbol の
+    // コメントを参照）。symbols はあくまで「取れたら使う」補助情報なので、
+    // ここで例外を投げて OCR 自体を失敗させることは絶対にしない。
+    const symbols: OcrResult['symbols'] = []
+    for (const block of data.blocks ?? []) {
+      for (const paragraph of block.paragraphs) {
+        for (const line of paragraph.lines) {
+          for (const word of line.words) {
+            for (const symbol of word.symbols) {
+              symbols.push({ text: symbol.text, confidence: symbol.confidence })
+            }
+          }
+        }
+      }
+    }
+
     const result: OcrResult = {
       text: data.text.trim(),
       confidence: data.confidence,
       ms: Math.round(performance.now() - startedAt),
+      symbols,
     }
     post({ type: 'result', id: request.id, result })
   } catch (err) {
@@ -229,6 +300,7 @@ async function handleTerminate(): Promise<void> {
   const pending = tesseractWorkerPromise
   tesseractWorkerPromise = null
   appliedPsm = null
+  appliedOnceParams = false
   if (!pending) return
   try {
     const worker = await pending

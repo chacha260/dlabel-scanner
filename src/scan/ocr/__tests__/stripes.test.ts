@@ -3,7 +3,7 @@
 // 直接の再現テストなので、findDenseBand が文字の行を含めないことを厳しめに確認する。
 
 import { describe, expect, it } from 'vitest'
-import { countTransitions, findDenseBand } from '../stripes'
+import { countColTransitions, countRowTransitions, countTransitions, detectStripeRegion, findDenseBand, luma } from '../stripes'
 
 // 0/255 の交互パターン（理想化したバーコードのバー）を作る
 function alternating(length: number, period = 4): Uint8ClampedArray {
@@ -89,5 +89,111 @@ describe('findDenseBand', () => {
     expect(findDenseBand([0, 0, 0])).toBeNull()
     expect(() => findDenseBand([5])).not.toThrow()
     expect(findDenseBand([5])).toEqual({ start: 0, end: 0 })
+  })
+})
+
+// countRowTransitions / countColTransitions / detectStripeRegion は、デコーダ非依存の
+// 縞マスク（1-B: ROI 全体をスキャンしてデコード可否によらずバーコードらしい領域を
+// 検出する）を検証する。RGBA の数値配列を直接組み立て、canvas には一切依存しない。
+
+// 幅 w・高さ h の RGBA バッファを、values[y][x]（輝度値）から組み立てる。
+// R=G=B=values[y][x]、A=255（常に不透明）にすることで luma() の結果が values の
+// 値そのものになるようにしている。
+function toRgba(values: number[][]): Uint8ClampedArray {
+  const h = values.length
+  const w = values[0]?.length ?? 0
+  const data = new Uint8ClampedArray(w * h * 4)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const v = values[y][x]
+      const o = (y * w + x) * 4
+      data[o] = v
+      data[o + 1] = v
+      data[o + 2] = v
+      data[o + 3] = 255
+    }
+  }
+  return data
+}
+
+describe('luma', () => {
+  it('RGBAの1画素から輝度(luma)を計算する', () => {
+    const data = Uint8ClampedArray.from([10, 20, 30, 255])
+    const value = luma(data, 0)
+    expect(value).toBeCloseTo(0.299 * 10 + 0.587 * 20 + 0.114 * 30, 5)
+  })
+})
+
+describe('countRowTransitions / countColTransitions', () => {
+  it('横方向に交互パターンが並ぶ行では高い反転回数を返す', () => {
+    const w = 8
+    const row = Array.from({ length: w }, (_, x) => (x % 2 === 0 ? 0 : 255))
+    const data = toRgba([row])
+    const rowLuma = new Uint8ClampedArray(w)
+    const count = countRowTransitions(data, 0, w, rowLuma)
+    expect(count).toBeGreaterThan(5)
+  })
+
+  it('縦方向に交互パターンが並ぶ列では高い反転回数を返す', () => {
+    const h = 8
+    const values: number[][] = Array.from({ length: h }, (_, y) => [y % 2 === 0 ? 0 : 255])
+    const data = toRgba(values)
+    const colLuma = new Uint8ClampedArray(h)
+    const count = countColTransitions(data, 0, 1, 0, h, colLuma)
+    expect(count).toBeGreaterThan(5)
+  })
+})
+
+describe('detectStripeRegion', () => {
+  it('1次元バーコード相当（行方向だけが密）では rows のみ検出し、cols は null になる', () => {
+    const w = 40
+    const h = 20
+    const values: number[][] = []
+    for (let y = 0; y < h; y++) {
+      if (y >= 5 && y <= 14) {
+        // 縦棒（バー）: 同じパターンが帯の全行で繰り返される → 縦方向にはほぼ反転しない
+        values.push(Array.from({ length: w }, (_, x) => (Math.floor(x / 4) % 2 === 0 ? 0 : 255)))
+      } else {
+        values.push(new Array(w).fill(128)) // クワイエットゾーン相当のフラットな領域
+      }
+    }
+    const data = toRgba(values)
+
+    const region = detectStripeRegion(data, w, h)
+    expect(region).not.toBeNull()
+    expect(region!.rows).toEqual({ start: 5, end: 14 })
+    expect(region!.cols).toBeNull()
+  })
+
+  it('2次元シンボル相当（行・列の両方が密）では rows と cols の両方を矩形として検出する', () => {
+    const w = 20
+    const h = 20
+    const values: number[][] = []
+    for (let y = 0; y < h; y++) {
+      const row = new Array(w).fill(128)
+      if (y >= 5 && y <= 14) {
+        for (let x = 5; x <= 14; x++) {
+          row[x] = (x + y) % 2 === 0 ? 0 : 255 // チェッカーボード（縦横どちらに走査しても密に反転する）
+        }
+      }
+      values.push(row)
+    }
+    const data = toRgba(values)
+
+    const region = detectStripeRegion(data, w, h)
+    expect(region).not.toBeNull()
+    expect(region!.rows).toEqual({ start: 5, end: 14 })
+    expect(region!.cols).toEqual({ start: 5, end: 14 })
+  })
+
+  it('縞が全く無い（一様な）ROIでは null を返す', () => {
+    const values = Array.from({ length: 10 }, () => new Array(10).fill(128))
+    const data = toRgba(values)
+    expect(detectStripeRegion(data, 10, 10)).toBeNull()
+  })
+
+  it('空配列・幅/高さ0でも例外を投げない', () => {
+    expect(() => detectStripeRegion(new Uint8ClampedArray(0), 0, 0)).not.toThrow()
+    expect(detectStripeRegion(new Uint8ClampedArray(0), 0, 0)).toBeNull()
   })
 })
