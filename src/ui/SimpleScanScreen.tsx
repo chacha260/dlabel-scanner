@@ -23,17 +23,14 @@ import { useCamera } from '../camera/useCamera'
 import { resolveZoomValue } from '../camera/zoom'
 import { useBarcodeScanner } from '../scan/useBarcodeScanner'
 import { isAnyOverlayOpen, isBarcodeScanEnabled, type BarcodeTriggerMode, type ScanMode } from '../scan/scanGating'
-import { applyTrimRules, visualizeControlChars, type TrimRules } from '../scan/barcode/trim'
+import { applyTrimRules, DEFAULT_TRIM_RULES, visualizeControlChars, type TrimRules } from '../scan/barcode/trim'
 import { truncateForDisplay } from '../scan/barcode/truncate'
 import {
   loadBarcodeTriggerMode,
   loadCaptureQuality,
   loadHelpSeen,
-  loadOcrCareful,
-  loadOcrEngine,
   loadOcrFilterMode,
   loadOcrPreprocess,
-  loadOcrPsm,
   loadRestrictToRoi,
   loadScanMode,
   loadSoundEnabled,
@@ -42,11 +39,8 @@ import {
   markHelpSeen,
   saveBarcodeTriggerMode,
   saveCaptureQuality,
-  saveOcrCareful,
-  saveOcrEngine,
   saveOcrFilterMode,
   saveOcrPreprocess,
-  saveOcrPsm,
   saveRestrictToRoi,
   saveScanMode,
   saveSoundEnabled,
@@ -57,30 +51,21 @@ import {
   applyOcrFilter,
   boxesToMask,
   captureFrameAndRoi,
-  compareOcrPasses,
   cropVideoSpaceRoi,
   cropVideoSpaceRoiRaw,
   DEFAULT_BARCODE_ROI,
   DEFAULT_ROI,
-  hasOcrEngineCached,
   isMlKitAvailable,
-  judgeByConfidence,
   loadPersistedBarcodeRoi,
   loadPersistedRoi,
-  mergeVerdicts,
   OCR_FILTER_LABELS,
-  preloadOcr,
   recognizeCaptured,
   savePersistedBarcodeRoi,
   savePersistedRoi,
   trimBarcodeBoxesToStripes,
-  type CharVerdict,
   type HandleId,
-  type OcrEngineId,
   type OcrFilterMode,
-  type OcrOptions,
   type OcrPreprocessOptions,
-  type OcrProgress,
   type RoiRect,
 } from '../scan/ocr'
 import { useDraggableRoi } from './useDraggableRoi'
@@ -94,8 +79,9 @@ import { copyToClipboard, sourceBadgeClass, sourceBadgeLabel } from './lib'
 // （初回表示までに読み込めていればよく、常に即必要というわけではないため）。
 const HelpSheet = lazy(() => import('./HelpSheet'))
 
-// 整形パネルも同じ理由で別チャンクにする（バーコードモードで「整形」ボタンを
-// 押すまでは読み込まれない）。
+// 整形パネルも同じ理由で別チャンクにする（画面上部の共通設定バーにある「整形」
+// ボタンを押すまでは読み込まれない。バーコード・OCR共通のルールを編集するパネル
+// なので、モードを問わずここから開く）。
 const TrimPanel = lazy(() => import('./TrimPanel'))
 
 // ライセンス情報パネルも別チャンクにする。同梱しているライセンス本文全文
@@ -153,12 +139,6 @@ type CapturedFrameState = {
   maskRects: NormalizedRect[]
 }
 
-const PSM_OPTIONS: { value: OcrOptions['psm']; label: string }[] = [
-  { value: '7', label: '単一行' },
-  { value: '8', label: '単語' },
-  { value: '6', label: 'ブロック' },
-]
-
 // バーコードの読み取り契機の選択肢（バーコードモードのセグメント切り替え用）。
 // hint は選択中のときだけ画面に出す一行説明で、現場の人が「今どっちなのか」を
 // 迷わないようにするためのもの。
@@ -172,23 +152,6 @@ const FILTER_OPTIONS: { value: OcrFilterMode; label: string }[] = [
   { value: 'digits', label: OCR_FILTER_LABELS.digits },
   { value: 'alnum', label: OCR_FILTER_LABELS.alnum },
 ]
-
-// OCRエンジンの選択肢（結果カード内のセグメント切り替え用）。ML Kit は
-// isMlKitAvailable() が false の環境（ブラウザ）では選べないため、描画側で
-// 個別に disabled を付ける（選択肢自体を消すと「なぜ無いのか」が伝わらない）。
-const ENGINE_OPTIONS: { value: OcrEngineId; label: string }[] = [
-  { value: 'tesseract', label: 'Tesseract' },
-  { value: 'mlkit', label: 'ML Kit' },
-]
-
-// 「丁寧に読む」(2パス)で1回目とは別のPSMを使うための対応。7(単一行)を
-// 選んでいるときだけ8(単語)に振り、それ以外(8・6)は7に戻す単純な規則。
-// 「もっとも一般的な既定である単一行から離れてみる／単一行に戻してみる」
-// という2択に単純化しており、3つの組み合わせを総当りする必要はないと判断した
-// （どのPSMを2回目に使うべきかも実測できていない前提のため、まずは単純さを優先する）。
-function pickSecondaryPsm(psm: OcrOptions['psm']): OcrOptions['psm'] {
-  return psm === '7' ? '8' : '7'
-}
 
 // 「怪しい文字」をタップしたときに切り替える、字形が紛らわしい文字の相互対応表。
 // OCRで特に混同されやすいと現場から報告のあった組だけに絞ってある
@@ -221,8 +184,11 @@ type ResultItem = {
   // 表示・コピー・重複判定に使う値。
   // バーコード: 読み取りを受け付けた瞬間の整形ルールを適用した結果（空文字になる場合は raw と同じ）。
   //             ルールは後から変えても過去の結果には遡って効かない（スキャン時点で確定させる）。
-  // OCR: raw と同じ値を入れておく（フィルタは filterMode の切り替えに追従させたいため、
-  //      ここでは適用せず displayValueOf 側で都度計算する）。
+  // OCR: raw に、読み取りを受け付けた瞬間の整形ルール（ocrTrimRulesSnapshot）を適用した結果。
+  //      バーコードと同じ「読み取った瞬間に確定」という心的モデルに揃えるための値であり、
+  //      実際の表示・コピーには displayValueOf の計算結果を使う（後述のとおり、OCRは
+  //      これに加えて「手直し」「フィルタ」を都度合成する必要があるため、この value 単体を
+  //      直接読むことはない）。
   value: string
   format?: string
   at: number
@@ -230,16 +196,41 @@ type ResultItem = {
   // raw（エンジンの生出力）は直しても一切書き換えない（常に見せ続ける方針のため）。
   // 未設定（undefined）は「まだ一度も直していない」＝raw をそのまま使う、という意味。
   correctedRaw?: string
+  // OCR結果だけが持つ、この行を読み取った瞬間の整形ルールのスナップショット。
+  // 整形ルールは「読み取った瞬間に確定」させる（バーコードと同じ心的モデル）ため、
+  // あとから画面上部の「整形」でルールを変えても、この行の表示は変わらない。
+  // バーコードは value に結果を1回だけ焼き込んで終わりだが、OCRは焼き込んだ後に
+  // 「怪しい文字」の手直しが起きうるため、手直し後の raw に対して整形をかけ直す必要があり、
+  // そのために使うルールをこのスナップショットとして持たせている（trimRulesRef.current の
+  // “今の値”を使ってしまうと、手直しのたびに最新のルールが遡って効いてしまうため）。
+  ocrTrimRulesSnapshot?: TrimRules
 }
 
-// 表示用の値を求める。OCR結果だけ抽出フィルタの対象になる
-// （フィルタはここで毎回計算するだけの純粋処理なので、切り替えは即座に反映される）。
-// バーコードは整形済みの value をそのまま返す（フィルタのように毎回計算し直すものではない）。
-// OCRは「手で直した後の文字列」（correctedRaw、無ければ raw）にフィルタをかけた値を返す。
-// これにより、怪しい文字をタップで直した結果が、コピー・一覧に積む値にそのまま反映される。
+// 表示用の値を求める。
+//
+// バーコード: 整形済みの value をそのまま返す（読み取った瞬間に確定済みで、以後は
+//             不変。フィルタのように毎回計算し直すものではない）。
+//
+// OCR: 次の3段階を、この順序で合成する。
+//   1. 手直し（correctedRaw、無ければ raw）: 字形の紛らわしい文字をタップで直した後の
+//      文字列。これはエンジンの生テキストの「文字の中身」だけを直すもので、文字数・
+//      並びは変わらない。
+//   2. 整形（ocrTrimRulesSnapshot による applyTrimRules）: 前後の余分な部分を切り出す。
+//   3. 文字種フィルタ（filterMode による applyOcrFilter）: 数字のみ/英数字のみを抽出する。
+// 整形を先・フィルタを後にしているのは、フィルタ（特に「数字のみ」「英数字のみ」）が
+// 空白や記号を落としてしまうと、整形の cutFrom/cutUpTo が探している区切り文字
+// （スペースや GS など）自体が消えてしまい、区切り位置を見つけられなくなるため。
+// 「まず読み取った値から必要な範囲を切り出し、その上で文字種を絞り込む」という
+// 順序でなければ、整形ルールが意図通りに機能しない。
+// フィルタだけは filterMode の切り替えに即座に追従させたいので、ここで都度計算する
+// （整形は既に発生した「読み取り」という出来事に対する後処理、フィルタは「今どう見たいか」
+// という表示の好みなので、性質が違う。整形はスナップショットで固定し、フィルタは
+// 常に最新の選択を使う、という非対称な扱いをしているのはこのため）。
 function displayValueOf(item: ResultItem, filterMode: OcrFilterMode): string {
   if (item.source !== 'ocr') return item.value
-  return applyOcrFilter(item.correctedRaw ?? item.raw, filterMode)
+  const corrected = item.correctedRaw ?? item.raw
+  const trimmed = applyTrimRules(corrected, item.ocrTrimRulesSnapshot ?? DEFAULT_TRIM_RULES)
+  return applyOcrFilter(trimmed, filterMode)
 }
 
 // 前処理済み ImageData をそのまま canvas に描画するだけの小さな表示コンポーネント。
@@ -259,13 +250,18 @@ function CapturedImageCanvas({ image, className }: { image: ImageData; className
   return <canvas ref={canvasRef} className={className} style={{ imageRendering: 'pixelated' }} />
 }
 
-// 「生の読み取り結果」を1文字ずつ描画し、怪しい文字だけ色を変える。
-// verdicts は agreement.ts の判定結果で、engine由来の並び（symbolsベース）と
-// 実際の text の文字並びが必ずしも1対1で対応しない（空白・改行がsymbolsに
-// 含まれないなど）ことが agreement.ts 自身のコメントで明記されている。
-// 位置がずれたまま強調すると「違う文字が怪しいと言われる」という逆効果になるため、
-// verdicts の要素数が Array.from(text) の要素数と一致するときだけ強調表示に切り替え、
-// 一致しないときは何もしない（従来通りの、ただのテキスト表示のまま）。
+// 「生の読み取り結果」を1文字ずつ描画し、字形が紛らわしい文字（CHAR_TOGGLE_MAPに
+// 載っている文字）をタップ可能にする。
+//
+// 以前は agreement.ts の判定（文字ごとの信頼度 / 2パス照合）で「怪しい」と
+// 判定された文字だけをタップ可能にし、それ以外は普通のテキストとして表示していた。
+// tesseract.js を削除して ML Kit 1本にした結果、判定材料のうち文字ごとの信頼度
+// （judgeByConfidence）は完全に成立しなくなった（ML Kit は信頼度を一切返さない）。
+// 「どの文字が怪しいか」を機械が教えてくれなくなった以上、"怪しい文字だけ直せる"
+// という絞り込みは維持できない。そこで方針を「機械が怪しいと言った文字だけ直せる」
+// から「**人がどこでも直せる**」へ広げる: 対応表に載っている文字（字形が紛らわしいと
+// 現場から報告のあった文字）は、怪しいかどうかに関わらずすべてタップ可能にする。
+// 誤って正しい文字を切り替えてしまっても、もう一度タップすれば元に戻るため実害は無い。
 //
 // correctedChars は「タップで直した後」の文字配列（生テキストと同じ並び）。
 // 生テキスト自体は書き換えない（このアプリの確定方針: エンジンの生出力は
@@ -273,19 +269,17 @@ function CapturedImageCanvas({ image, className }: { image: ImageData; className
 // 一覧行の value に反映する。
 function OcrRawTextView({
   text,
-  verdicts,
   correctedChars,
   onToggleChar,
 }: {
   text: string
-  verdicts: CharVerdict[]
   correctedChars: string[] | null
   onToggleChar: (index: number) => void
 }) {
   const chars = Array.from(text)
-  const aligned = correctedChars !== null && verdicts.length === chars.length
 
-  if (!aligned) {
+  // correctedChars が無い（結果自体が無い）場合はタップ機能ごと出さず、ただのテキスト。
+  if (correctedChars === null || correctedChars.length !== chars.length) {
     return <>{text}</>
   }
 
@@ -293,19 +287,10 @@ function OcrRawTextView({
     <>
       {chars.map((original, index) => {
         const shown = correctedChars[index] ?? original
-        const verdict = verdicts[index]
-        if (!verdict?.uncertain) {
-          return <span key={index}>{shown}</span>
-        }
         const swapTarget = CHAR_TOGGLE_MAP[shown]
         if (!swapTarget) {
-          // 怪しいと判定されたが対応表に無い文字（例: 数字・英字以外や対象外の字形）。
-          // タップでの切り替え候補が無いので、色だけ変えてクリック不可のまま見せる。
-          return (
-            <span key={index} className="rounded bg-amber-500/30 px-0.5 text-amber-200">
-              {shown}
-            </span>
-          )
+          // 対応表に無い文字（数字・英字以外や対象外の字形）はタップできない、ただの文字。
+          return <span key={index}>{shown}</span>
         }
         return (
           <button
@@ -314,7 +299,7 @@ function OcrRawTextView({
             onClick={() => onToggleChar(index)}
             aria-label={`${shown} を ${swapTarget} に切り替える`}
             style={{ font: 'inherit', color: 'inherit' }}
-            className="rounded bg-amber-500/30 px-0.5 text-amber-200 underline decoration-dotted decoration-amber-300 underline-offset-2 active:bg-amber-500/50"
+            className="rounded px-0.5 underline decoration-dotted decoration-slate-500 underline-offset-2 active:bg-slate-700"
           >
             {shown}
           </button>
@@ -496,18 +481,23 @@ export function SimpleScanScreen() {
   const handleCloseLicenses = useCallback(() => setLicenseOpen(false), [])
 
   const [ocrBusy, setOcrBusy] = useState(false)
-  const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null)
-  // engine はこの結果が「どちらのエンジンで読んだものか」を保持する。ML Kit は
-  // 信頼度を返さない（常に0）ため、結果カード側で「信頼度を表示してよいか」を
-  // 判定するのに使う（confidence の値だけでは 0% なのか「情報が無い」のか区別できない）。
-  const [ocrInfo, setOcrInfo] = useState<{ ms: number; confidence: number; engine: OcrEngineId } | null>(null)
+  const [ocrInfo, setOcrInfo] = useState<{ ms: number; confidence: number } | null>(null)
   const [ocrRawText, setOcrRawText] = useState<string | null>(null)
-  // 「どの文字が怪しいか」の判定結果（agreement.ts）。ocrRawText と対になる。
-  const [charVerdicts, setCharVerdicts] = useState<CharVerdict[]>([])
   // 怪しい文字をタップで直した後の文字列（1文字ずつの配列。ocrRawText と同じ並び）。
   // null は「まだ結果が無い」を表す。生テキスト（ocrRawText）そのものは書き換えない
   // （エンジンの生出力を常に見せ続ける、というこのアプリの確定方針のため）。
+  //
+  // 以前はここに「どの文字が怪しいか」の自動判定結果（agreement.ts の CharVerdict[]）も
+  // 持っていたが、ML Kit は信頼度を返さないため自動判定自体が成立しなくなった
+  // （OcrRawTextView のコメント参照）。判定が無い代わりに、対応表に載っている文字は
+  // すべてタップ可能にしたので、この state だけで足りる。
   const [correctedChars, setCorrectedChars] = useState<string[] | null>(null)
+  // 現在表示中のOCR結果カードに対して「読み取った瞬間」に確定させた整形ルールの
+  // スナップショット。結果カードの「整形・フィルタ後」プレビューは、怪しい文字を
+  // タップで直した後の生テキストに対してもこのスナップショットで整形をかけ直す
+  // 必要があるため（displayValueOf・ResultItem.ocrTrimRulesSnapshot と同じ理由）、
+  // trimRulesRef.current（今の設定）ではなくこの state を使う。
+  const [ocrTrimSnapshot, setOcrTrimSnapshot] = useState<TrimRules | null>(null)
   // 直近にappendResultした「OCR結果」行のid。怪しい文字をタップで直したとき、
   // 結果一覧の該当行にも反映するために使う（一覧は積みっぱなしで遡って書き換えないのが
   // 基本方針だが、これは「直前に読んだその場の結果を、読んだその場で直す」操作であり、
@@ -516,7 +506,6 @@ export function SimpleScanScreen() {
   // シャッターを押した瞬間に確定させた「実際に OCR へ渡す画像」。結果が出たあとも
   // ユーザーが消すか次のシャッターを押すまで表示し続け、同じ画像での再認識にも使う。
   const [capturedImage, setCapturedImage] = useState<ImageData | null>(null)
-  const [showFirstUseHint, setShowFirstUseHint] = useState(!hasOcrEngineCached())
   // OCR設定の比較パネル（OcrCompareSheet）の開閉。全画面パネルなので、開いている間は
   // helpOpen 等と同様にバーコード検出を止める必要がある。専用のオーバーレイフラグを
   // scanGating.ts に増やす代わりに、既存の ocrResultPanelOpen（結果カード表示中は
@@ -524,24 +513,19 @@ export function SimpleScanScreen() {
   // （下の overlaysOpen を参照）。
   const [compareOpen, setCompareOpen] = useState(false)
 
+  // この端末で ML Kit が実際に使えるか。Capacitor.isNativePlatform() は端末が
+  // ネイティブかどうかという静的な性質で、実行中に変わることは無いため、
+  // マウント時に一度だけ判定すれば十分（毎レンダー呼び直す理由が無い）。
+  // ブラウザ（pnpm dev / GitHub Pages）では常に false になり、文字モードの
+  // シャッターが無効化され、その旨の案内が表示される（下の JSX を参照）。
+  const [mlkitAvailable] = useState(isMlKitAvailable)
+
   // 結果カード内だけの設定（このアプリで唯一の設定面）。前回の選択を次回起動時にも
   // 復元する（loadScanMode 等、他の設定の読み方と同じ流儀）。
-  const [psm, setPsm] = useState<OcrOptions['psm']>(loadOcrPsm)
   const [filterMode, setFilterMode] = useState<OcrFilterMode>(loadOcrFilterMode)
-  // 「丁寧に読む」(2パス)。既定OFF（認識時間が約2倍になるため）。
-  const [ocrCareful, setOcrCareful] = useState<boolean>(loadOcrCareful)
   // OCR前処理（罫線除去・縞マスク・コントラスト正規化）の組み合わせ。比較モードで
   // 「この設定を使う」を選ぶまでは既定値（すべてON）のまま。
   const [preprocessOptions, setPreprocessOptions] = useState<OcrPreprocessOptions>(loadOcrPreprocess)
-  // OCRエンジン（Tesseract / ML Kit）。保存値は正規化してから使う: 別端末で
-  // 'mlkit' を選んで保存した設定が、ML Kit の無いブラウザ・端末にそのまま
-  // 同期されてくることがあるため、この端末で実際に使えないエンジンを
-  // 「選択中」のまま保持しない（isMlKitAvailable() は Capacitor 依存の同期・
-  // 例外を投げない判定関数で、ブラウザでは常に false になる）。
-  const [engine, setEngine] = useState<OcrEngineId>(() => {
-    const saved = loadOcrEngine()
-    return saved === 'mlkit' && !isMlKitAvailable() ? 'tesseract' : saved
-  })
 
   const previewRef = useRef<HTMLDivElement | null>(null)
 
@@ -580,24 +564,6 @@ export function SimpleScanScreen() {
   // シャッター押下時点の静止フレーム一式。「同じ画像で再認識」やマスクON/OFFの
   // 切り替え後の再クロップに使う（撮り直しはしない）。
   const capturedFrameRef = useRef<CapturedFrameState | null>(null)
-
-  const preloadTriggeredRef = useRef(false)
-  const ensureOcrPreloaded = useCallback(() => {
-    if (preloadTriggeredRef.current) return
-    preloadTriggeredRef.current = true
-    // preloadOcr は失敗しても reject せず { ok: false, error } を返す契約
-    // （呼び捨てで unhandled rejection にならないようにするため）。
-    // ここで ok を見ずに捨ててしまうと、学習データが読めていないことに誰も気づけず、
-    // 「シャッターを押しても毎回失敗するが理由が分からない」状態になる
-    // （.gz 展開に依存していた頃、実機でまさにこれが起きていた）。
-    // 事前読み込みの失敗自体は致命的ではない（実際の認識時に改めて初期化を試みる）ため、
-    // 処理は止めず、軽い通知に留めたうえで次回のシャッターで再試行できるようにする。
-    void preloadOcr((p) => setOcrProgress(p)).then((result) => {
-      if (result.ok) return
-      preloadTriggeredRef.current = false // 次のシャッターでもう一度初期化を試させる
-      showToast(result.error, 'error')
-    })
-  }, [])
 
   // 画面はこれ1つしかないため、マウント時にカメラを起動しアンマウント時に止めるだけでよい
   useEffect(() => {
@@ -668,15 +634,20 @@ export function SimpleScanScreen() {
 
   // 戻り値の id は、OCR結果の呼び出し元（runRecognition）が「怪しい文字を後から
   // 直したとき、一覧のどの行に書き戻すか」を覚えておくために使う。
-  const appendResult = useCallback((source: ResultItem['source'], raw: string, value: string, format?: string) => {
-    const id = nextIdRef.current++
-    const item: ResultItem = { id, source, raw, value, format, at: Date.now() }
-    // ref を state の反映（effect）まで待たずにここで更新する。
-    // 待つと、その間に届いたフレームで同じ値が二重に追加され得るため。
-    resultsRef.current = [item, ...resultsRef.current]
-    setResults((prev) => [item, ...prev])
-    return id
-  }, [])
+  // ocrTrimRulesSnapshot は OCR結果にだけ渡す（バーコードは value に整形結果を
+  // 直接焼き込んでしまうので、スナップショットを別途持つ必要がない）。
+  const appendResult = useCallback(
+    (source: ResultItem['source'], raw: string, value: string, format?: string, ocrTrimRulesSnapshot?: TrimRules) => {
+      const id = nextIdRef.current++
+      const item: ResultItem = { id, source, raw, value, format, at: Date.now(), ocrTrimRulesSnapshot }
+      // ref を state の反映（effect）まで待たずにここで更新する。
+      // 待つと、その間に届いたフレームで同じ値が二重に追加され得るため。
+      resultsRef.current = [item, ...resultsRef.current]
+      setResults((prev) => [item, ...prev])
+      return id
+    },
+    [],
+  )
 
   const handleScan = useCallback(
     (scan: RawScan) => {
@@ -807,111 +778,78 @@ export function SimpleScanScreen() {
   // 消えてしまうトーストだと、後者の「再読み込みが必要」という重要な状態を
   // 5秒で見失ってしまう。
 
-  // 実行時に実際に使うエンジンを1箇所で確定させる。保存値・状態がどうであれ、
-  // この端末で ML Kit が使えないなら必ず tesseract にフォールバックする
-  // （engine の初期化時に一度正規化してはいるが、ここでも念のため同じ判定を
-  // 通しておく。保存値を直接 JSON 編集された場合や、将来 engine の初期化経路が
-  // 増えた場合でも、実行だけは常に安全側に倒れるようにするための保険）。
-  const effectiveEngine = useCallback((): OcrEngineId => {
-    return engine === 'mlkit' && !isMlKitAvailable() ? 'tesseract' : engine
-  }, [engine])
-
   // 実際に認識にかけている ImageData を渡して結果一覧に積む共通処理。
   // シャッター押下の初回認識・「同じ画像で再認識」のどちらからも呼ぶ。
   //
-  // 「丁寧に読む」(ocrCareful) がONのときは、同じ画像に対してもう一度、別のPSMで
-  // 認識し直し（2パス目）、2回の結果を突き合わせて食い違った文字を「怪しい」と
-  // 判定する。一覧に積むのはあくまで1回目（primary）の結果で、2回目は
-  // 「裏取り」だけに使う（agreement.ts の compareOcrPasses のコメントを参照）。
-  // ML Kit には PSM という概念が無く2パスに意味が無いため、effectiveEngine が
-  // mlkit のときは ocrCareful が ON でも2パス目を走らせない（結果カード側でも
-  // トグル自体を隠すが、保存値の不整合に備えてここでも二重に防ぐ）。
+  // 以前はここに「丁寧に読む」(ocrCareful) がONのときの2パス目（別PSMで再認識し、
+  // 食い違いを検出する）ロジックがあったが、ML Kit にはPSMという概念自体が無いため
+  // 「別のPSMで」という前提が丸ごと成立しなくなった。前処理を変えた2パス
+  // （素の画像 vs コントラスト補正）として作り直すのは別の作業として、ここでは
+  // いったん単純な1パスに戻す（compareOcrPasses / mergeVerdicts は agreement.ts に
+  // 残してあるので、作り直す際にそのまま使える）。
   //
-  // 2パス目の呼び出しは try/catch で個別に受け止める: 2回目が失敗しても
-  // 1回目の結果自体は無駄にしない（怪しい判定の材料が減るだけ）。ここで
-  // 例外を外側に漏らすと、せっかく読めた1回目の結果まで「OCRに失敗しました」に
-  // なってしまい、ocrBusy はちゃんと finally で降りるとはいえユーザー体験として
-  // 大きな後退になる。
+  // isMlKitAvailable() が false（ブラウザ）のときは recognizeCaptured 自体が
+  // 分かりやすい日本語エラーで reject する（scan/ocr/index.ts 参照）ため、
+  // ここでは普通に catch すれば済む。シャッターボタン自体も無効化してあるので
+  // 通常はこの分岐に来ないが、二重の安全策としてエラーメッセージをそのまま見せる。
   const runRecognition = useCallback(
     (image: ImageData) => {
       setOcrBusy(true)
-      setOcrProgress(null)
-      const usedEngine = effectiveEngine()
-      const primaryOptions: OcrOptions = { psm, engine: usedEngine }
 
-      void recognizeCaptured(image, primaryOptions, (p) => setOcrProgress(p))
-        .then(async (primary) => {
-          setShowFirstUseHint(false)
+      void recognizeCaptured(image)
+        .then((result) => {
+          setOcrInfo({ ms: result.ms, confidence: result.confidence })
+          setOcrRawText(result.text)
+          setCorrectedChars(Array.from(result.text))
+          // 整形ルールは「読み取りを受け付けた瞬間」に確定させる（バーコードの
+          // handleScan と同じ考え方）。ref から今の設定を1回だけ読み、この結果カード・
+          // 一覧行の両方でずっとこのスナップショットを使い続ける。
+          const trimSnapshot = trimRulesRef.current
+          setOcrTrimSnapshot(trimSnapshot)
 
-          let verdicts: CharVerdict[]
-          if (ocrCareful && usedEngine === 'tesseract') {
-            const secondaryOptions: OcrOptions = { psm: pickSecondaryPsm(psm), engine: usedEngine }
-            let secondaryText = ''
-            try {
-              const secondary = await recognizeCaptured(image, secondaryOptions)
-              secondaryText = secondary.text
-            } catch {
-              // 2回目が失敗しても1回目の結果は活かす。裏取りができなかった
-              // だけなので、怪しい判定は信頼度ベースのものだけにフォールバックする。
-              secondaryText = ''
-            }
-            const byPasses = secondaryText.length > 0 ? compareOcrPasses(primary.text, secondaryText) : []
-            const byConfidence = judgeByConfidence(primary.symbols)
-            verdicts = byPasses.length > 0 ? mergeVerdicts(byPasses, byConfidence) : byConfidence
-          } else {
-            // 2パスをしていない（またはML Kitで2パスに意味が無い）ときは、
-            // 信頼度ベースの判定だけを使う。symbols が空配列なら judgeByConfidence が
-            // 空配列を返し、その場合は「強調なし」の普通の表示になる（agreement.ts参照）。
-            verdicts = judgeByConfidence(primary.symbols)
-          }
-
-          setOcrInfo({ ms: primary.ms, confidence: primary.confidence, engine: usedEngine })
-          setOcrRawText(primary.text)
-          setCharVerdicts(verdicts)
-          setCorrectedChars(Array.from(primary.text))
-
-          if (primary.text.trim().length === 0) {
+          if (result.text.trim().length === 0) {
             lastOcrResultIdRef.current = null
             showToast('文字を読み取れませんでした', 'error')
           } else {
-            lastOcrResultIdRef.current = appendResult('ocr', primary.text, primary.text)
+            const trimmedValue = applyTrimRules(result.text, trimSnapshot)
+            lastOcrResultIdRef.current = appendResult('ocr', result.text, trimmedValue, undefined, trimSnapshot)
           }
         })
-        .catch(() => showToast('OCRに失敗しました', 'error'))
+        .catch((err: unknown) => {
+          showToast(err instanceof Error ? err.message : 'OCRに失敗しました', 'error')
+        })
         .finally(() => {
           setOcrBusy(false)
-          setOcrProgress(null)
         })
     },
-    [psm, ocrCareful, effectiveEngine, appendResult],
+    [appendResult],
   )
 
-  // エンジンごとに「渡すべき画像」が違うため、切り出しはこの1箇所に集約する。
-  //
-  // preprocessRoi のパイプライン（グレースケール化・コントラスト正規化・罫線除去、
-  // そして文字行の高さが TARGET_ROI_HEIGHT_PX=96px になるまでの縮小）は、すべて
-  // tesseract.js の LSTM に合わせて調整したものである。Tesseract はスキャンした
-  // 書類向けのエンジンなので、この前処理が効く。
-  //
-  // 一方 ML Kit は「カメラで撮った自然な写真」で学習されているため、同じ画像を
-  // 渡すと (1) 96px まで縮小されて細部が失われる (2) グレースケール化と
-  // コントラスト伸長でモデルが期待する画素分布から外れる、という二重の不利を負う。
-  // それでは「ML Kit のほうが精度が低い」という結果が出たときに、エンジンの
-  // 実力差なのか Tesseract 向けの前処理を押し付けたせいなのか区別がつかず、
-  // 比較する意味が無くなる。ML Kit には等倍・カラーのままの素の切り出しを渡す。
+  // 前処理の組み合わせが「3つのフラグすべてOFF」のときは、preprocessRoi の
+  // グレースケール化・縮小すら経ない、本当に手を加えていない画像（cropVideoSpaceRoiRaw）
+  // を使う。preprocessRoi の縮小・グレースケール化は tesseract.js の LSTM に合わせて
+  // 調整したものであり、ML Kit（自然な写真で学習されたモデル）にとってはこの2段階が
+  // 有利に働かない（cropVideoSpaceRoiRaw のコメント参照）。比較パネル（OcrCompareSheet）
+  // の「素の画像」プリセットもこの同じ判定でcropVideoSpaceRoiRawを使っているため、
+  // 比較して「この設定を使う」を押した結果と、実際の撮影時の挙動を一致させる意味もある。
+  const isRawPreprocess = useCallback(
+    (options: OcrPreprocessOptions) => !options.removeRuledLines && !options.maskStripes && !options.normalizeContrast,
+    [],
+  )
+
   const buildOcrImage = useCallback(
     (frame: OffscreenCanvas, videoRoi: RoiRect, maskRects: NormalizedRect[] | undefined) => {
-      if (effectiveEngine() === 'mlkit') {
-        return cropVideoSpaceRoiRaw(frame, videoRoi, maskRects)
-      }
-      return cropVideoSpaceRoi(frame, videoRoi, maskRects, preprocessOptions)
+      return isRawPreprocess(preprocessOptions)
+        ? cropVideoSpaceRoiRaw(frame, videoRoi, maskRects)
+        : cropVideoSpaceRoi(frame, videoRoi, maskRects, preprocessOptions)
     },
-    [effectiveEngine, preprocessOptions],
+    [isRawPreprocess, preprocessOptions],
   )
 
   const handleShutterOcr = useCallback(() => {
     if (ocrBox.isDragging) return // 枠をドラッグ中に誤ってシャッターが走らないようにする
     if (helpOpen) return // 使い方パネル表示中は誤操作防止のためOCRを起動しない
+    if (!mlkitAvailable) return // ブラウザではボタン自体を無効化してあるが、念のための二重防御
     const video = camera.videoRef.current
     if (!video || !camera.ready) {
       showToast('カメラの準備ができていません', 'error')
@@ -923,12 +861,10 @@ export function SimpleScanScreen() {
     const captured = captureFrameAndRoi(video, ocrBox.roi)
     setOcrInfo(null)
     setOcrRawText(null)
-    setCharVerdicts([])
     setCorrectedChars(null)
+    setOcrTrimSnapshot(null)
     lastOcrResultIdRef.current = null
     setOcrBusy(true)
-    setOcrProgress(null)
-    ensureOcrPreloaded()
 
     // バーコード検出はフレームループが持つのと同じリーダーを再利用し、
     // シャッター1回につき1回だけ行う（フレームごとには絶対に行わない）。
@@ -957,22 +893,21 @@ export function SimpleScanScreen() {
       .catch(() => {
         showToast('画像の取り込みに失敗しました', 'error')
         setOcrBusy(false)
-        setOcrProgress(null)
       })
   }, [
     ocrBox.isDragging,
     ocrBox.roi,
     helpOpen,
+    mlkitAvailable,
     camera.videoRef,
     camera.ready,
-    ensureOcrPreloaded,
     detectBoxes,
     autoMaskEnabled,
     buildOcrImage,
     runRecognition,
   ])
 
-  // 撮影しなおさず、現在の PSM・マスク設定で同じ静止フレームを読み直す
+  // 撮影しなおさず、現在のマスク設定で同じ静止フレームを読み直す
   // （フィルタはここでは無関係）。マスクON/OFFの切り替え後の比較にもこれを使う。
   const handleRetrySameImage = useCallback(() => {
     const captured = capturedFrameRef.current
@@ -988,8 +923,8 @@ export function SimpleScanScreen() {
     setCapturedImage(null)
     setOcrInfo(null)
     setOcrRawText(null)
-    setCharVerdicts([])
     setCorrectedChars(null)
+    setOcrTrimSnapshot(null)
     lastOcrResultIdRef.current = null
     setMaskedCount(0)
     capturedFrameRef.current = null
@@ -999,24 +934,9 @@ export function SimpleScanScreen() {
     setAutoMaskEnabled(checked)
   }, [])
 
-  const handleChangePsm = useCallback((next: OcrOptions['psm']) => {
-    setPsm(next)
-    saveOcrPsm(next)
-  }, [])
-
   const handleChangeFilterMode = useCallback((next: OcrFilterMode) => {
     setFilterMode(next)
     saveOcrFilterMode(next)
-  }, [])
-
-  const handleChangeEngine = useCallback((next: OcrEngineId) => {
-    setEngine(next)
-    saveOcrEngine(next)
-  }, [])
-
-  const handleToggleCareful = useCallback((checked: boolean) => {
-    setOcrCareful(checked)
-    saveOcrCareful(checked)
   }, [])
 
   // 怪しい文字をタップしたときの相互切り替え（例: 1 ↔ I）。対応表に無い文字は
@@ -1049,27 +969,16 @@ export function SimpleScanScreen() {
   const handleOpenCompare = useCallback(() => setCompareOpen(true), [])
   const handleCloseCompare = useCallback(() => setCompareOpen(false), [])
 
-  // 比較パネルで「この設定を使う」が押されたときに、採用された設定を以後の
-  // シャッターの既定にする。PSM・前処理のどちらも永続化し、次回起動後も引き継ぐ
+  // 比較パネルで「この設定を使う」が押されたときに、採用された前処理設定を
+  // 以後のシャッターの既定にする。永続化して次回起動後も引き継ぐ
   // （比較モードの目的が「現場で実物を試して一番読めた設定を採用する」ことなので、
   // 決めた設定がアプリを閉じるたびに失われては本末転倒）。
-  // 比較モードで「この設定を使う」を押されたときに、その設定をこの画面の既定にする。
-  // エンジンも比較軸の1つなので一緒に受け取る（Tesseract と ML Kit のどちらが
-  // 現場のラベルで実際に読めるかを決めるのが、この比較モードの主目的のため）。
-  const handleAdoptCompareSettings = useCallback(
-    (nextPsm: OcrOptions['psm'], nextPreprocess: OcrPreprocessOptions, nextEngine: OcrEngineId) => {
-      setPsm(nextPsm)
-      saveOcrPsm(nextPsm)
-      setPreprocessOptions(nextPreprocess)
-      saveOcrPreprocess(nextPreprocess)
-      // 比較モードは実行環境で使えるプリセットしか出さないので、ここに
-      // 使えないエンジンが渡ってくることはない。それでも保存値の正規化は
-      // effectiveEngine() 側で二重にかかるため、そのまま保存してよい。
-      setEngine(nextEngine)
-      saveOcrEngine(nextEngine)
-    },
-    [],
-  )
+  // エンジンは ML Kit の1つだけになったため、以前あった psm・engine の受け渡しは
+  // 不要になった（OcrCompareSheet.tsx の onAdopt も preprocess だけを返す）。
+  const handleAdoptCompareSettings = useCallback((nextPreprocess: OcrPreprocessOptions) => {
+    setPreprocessOptions(nextPreprocess)
+    saveOcrPreprocess(nextPreprocess)
+  }, [])
 
   // ResultRow へは「呼ぶだけ」の同期的な口として渡すため、ここで await を閉じ込める
   // （行側に Promise の扱いを持ち込まない）。
@@ -1095,14 +1004,26 @@ export function SimpleScanScreen() {
 
   const backendLabel = backend === 'native' ? 'ネイティブ' : backend === 'zxing' ? 'zxing' : '起動中'
 
-  // OCR結果カードに表示するフィルタ後プレビュー（生テキストは常に別行で見せ続ける）。
-  // 怪しい文字をタップで直していた場合は、直した後の文字列にフィルタをかける
-  // （一覧・コピーに使う値と表示を一致させるため。displayValueOf と同じ考え方）。
+  // OCR結果カードに表示する「整形・フィルタ後」プレビュー（生テキストは常に別行で
+  // 見せ続ける）。怪しい文字をタップで直していた場合は、直した後の文字列に対して
+  // 整形→フィルタの順で適用する（一覧・コピーに使う値と表示を一致させるため。
+  // displayValueOf と同じ考え方・同じ順序。整形を先にする理由もそちらのコメント参照）。
   const correctedRawText = correctedChars !== null ? correctedChars.join('') : ocrRawText
-  const filteredPreview = correctedRawText !== null ? applyOcrFilter(correctedRawText, filterMode) : null
+  const trimmedPreviewText =
+    correctedRawText !== null ? applyTrimRules(correctedRawText, ocrTrimSnapshot ?? DEFAULT_TRIM_RULES) : null
+  const filteredPreview = trimmedPreviewText !== null ? applyOcrFilter(trimmedPreviewText, filterMode) : null
 
   // 今のモードが持っている枠（表示・ドラッグの対象）
   const activeBox = mode === 'ocr' ? ocrBox : barcodeBox
+
+  // ROI枠を描画するか。文字（OCR）モードでは枠が常に「OCRの対象そのもの」を
+  // 表すため、常に表示する。バーコードモードで「枠内のみ」がOFFのときは、
+  // 読み取り対象が画面全体になり枠に意味が無くなる（枠の外側が暗いままだと、
+  // 画面全体が対象なのに枠外が読めなさそうに見えて紛らわしい、という現場指摘）ため、
+  // 枠線・四隅のマーカー・リサイズハンドル・枠上のラベル・枠外を暗くする
+  // boxShadow をまとめて描画自体をやめる（枠を透明にするだけだと当たり判定や
+  // ラベルが残ってしまうため、丸ごと描画しないのが最も分かりやすい）。
+  const showRoiBox = mode === 'ocr' || restrictToRoi
 
   return (
     <div className="flex h-full flex-col bg-slate-950 text-slate-100">
@@ -1146,18 +1067,64 @@ export function SimpleScanScreen() {
         </button>
       </div>
 
+      {/* 共通設定バー: バーコード・OCRの両方に関わる「設定」（一度決めたらしばらく
+          変えないもの）だけをここに集約する。
+          置き分けの原則（現場フィードバックを踏まえて定めたもの）:
+            - 設定（一度決めたらしばらく変えないもの）      → ここ、モード切替の直下
+            - その場の操作（読み取りのたびに押すもの）        → 従来どおり下部の操作行
+          この原則に従うと、画質・整形は「設定」なのでここに置き、トーチ・一時停止／
+          押して読み取り・シャッターは「その場の操作」なので下部に残る。
+          「枠内のみ」「読み取り音」「読み取り契機」はバーコードの読み取り挙動そのものを
+          変える設定で OCR には関係が無いため、バーコードモード固有のブロックに残す。
+          モードを切り替えてもこのバーの位置・中身は変わらない（切り替えるたびにボタンの
+          位置が動くと押し間違いのもとになるため、あえてモード切替の直下という固定位置に
+          常に同じ内容を置く）。
+          - 画質: 以前はバーコードモードにしか出していなかったが、カメラの取得解像度は
+            OCRの精度にも直接効くため、共通設定に格上げした。
+          - 整形: バーコード・OCRで共有する整形ルール（TrimRules）を編集する入口。
+            ルールが1つに統合されたので、設定の置き場所も1つに統合する。 */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-slate-800 bg-slate-900 px-2 py-1.5">
+        <span className="shrink-0 text-[11px] font-semibold text-slate-400">画質</span>
+        <div role="radiogroup" aria-label="画質" className="flex flex-1 gap-1 rounded-lg bg-slate-800 p-0.5">
+          {CAPTURE_QUALITY_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              role="radio"
+              aria-checked={camera.quality === opt.value}
+              onClick={() => handleChangeQuality(opt.value)}
+              className={`min-h-8 flex-1 rounded-md text-[11px] font-bold transition-colors ${
+                camera.quality === opt.value ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 active:bg-slate-700'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={handleOpenTrimPanel}
+          aria-label="読み取り値の整形ルールを設定する"
+          aria-pressed={trimRules.enabled}
+          className={`flex min-h-8 shrink-0 items-center justify-center rounded-lg px-3 text-[11px] font-bold ${
+            trimRules.enabled ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300'
+          }`}
+        >
+          整形
+        </button>
+      </div>
+
       {/* カメラ映像（画面上部） */}
       <div ref={previewRef} className="relative shrink-0 overflow-hidden bg-black" style={{ height: '42vh' }}>
         <video ref={camera.videoRef} autoPlay muted playsInline className="absolute inset-0 h-full w-full object-cover" />
 
-        {!camera.error && (
+        {!camera.error && showRoiBox && (
           <div
             // バーコードモード: 「枠内のみ」ON時はこの枠がバーコードの採否を決めるため実線・
-            // 明るめに、OFF時は「今は画面全体が対象で、枠は狙う場所の目安に過ぎない」ことが
-            // 分かるよう破線にする。文字モードでは枠は常にOCRの対象そのものなので常に実線。
-            className={`absolute touch-none rounded-lg border-2 ${
-              mode === 'ocr' || restrictToRoi ? 'border-cyan-300' : 'border-dashed border-cyan-300/70'
-            }`}
+            // 明るめにする（OFF時はそもそもこの枠を描画しないので、この分岐に来るのは
+            // 常に「枠に意味がある」状態のときだけ。文字モードでは枠は常にOCRの対象
+            // そのものなので常に実線）。
+            className="absolute touch-none rounded-lg border-2 border-cyan-300"
             style={
               {
                 left: `${activeBox.roi.x * 100}%`,
@@ -1173,15 +1140,19 @@ export function SimpleScanScreen() {
             onPointerUp={activeBox.endDrag}
             onPointerCancel={activeBox.endDrag}
           >
-            {/* 枠が「何のための枠か」を一目で分かるようにする小さなラベル（枠のすぐ上） */}
+            {/* 枠が「何のための枠か」を一目で分かるようにする小さなラベル（枠のすぐ上）。
+                この分岐に来るのは常に「枠内のみ」ONのバーコードモードか文字モードなので、
+                「読み取り範囲: 画面全体」という文言はもう出番が無い（枠自体が無いため）。 */}
             {!ocrBusy && (
               <span className="pointer-events-none absolute -top-5 left-0 rounded bg-slate-900/85 px-1.5 py-0.5 text-[9px] font-semibold text-cyan-200">
-                {mode === 'ocr' ? '文字を囲む' : restrictToRoi ? '読み取り範囲: 枠内のみ' : '読み取り範囲: 画面全体'}
+                {mode === 'ocr' ? '文字を囲む' : '読み取り範囲: 枠内のみ'}
               </span>
             )}
 
             {/* バーコードモード: 一覧に既にある値を検出したときの、静かな「読み取り済み」通知。
-                追加はされない代わりに、枠の中央に短く表示するだけに留める（連打はしない）。 */}
+                追加はされない代わりに、枠の中央に短く表示するだけに留める（連打はしない）。
+                「枠内のみ」OFF時はこの枠自体が無いため、その場合の通知はプレビュー領域
+                中央に表示する（下の showRoiBox === false の分岐を参照）。 */}
             {mode === 'barcode' && duplicateHintVisible && (
               <span className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full bg-slate-900/90 px-3 py-1.5 text-xs font-bold text-amber-300 shadow-lg">
                 読み取り済み
@@ -1220,6 +1191,15 @@ export function SimpleScanScreen() {
                 </span>
               ))}
           </div>
+        )}
+
+        {/* バーコードモードで「枠内のみ」がOFFのとき（＝枠を描画していないとき）の
+            「読み取り済み」通知の代わりの置き場所。枠が無いのでプレビュー領域全体の
+            中央に出す（枠がある場合の見た目・位置は上の分岐のままで変えていない）。 */}
+        {!camera.error && !showRoiBox && duplicateHintVisible && (
+          <span className="pointer-events-none absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded-full bg-slate-900/90 px-3 py-1.5 text-xs font-bold text-amber-300 shadow-lg">
+            読み取り済み
+          </span>
         )}
 
         {camera.error && (
@@ -1273,7 +1253,9 @@ export function SimpleScanScreen() {
           </span>
         )}
 
-        {!camera.error && (
+        {/* 枠が表示されていない（バーコードモードで「枠内のみ」OFF）ときは、
+            リセットする対象の枠自体が見えていないため、このボタンも隠す。 */}
+        {!camera.error && showRoiBox && (
           <button
             type="button"
             onClick={handleResetRoi}
@@ -1311,23 +1293,25 @@ export function SimpleScanScreen() {
 
       {/* コントロール */}
       <div className="flex shrink-0 flex-col gap-2 border-b border-slate-800 bg-slate-900 p-3">
-        {mode === 'ocr' && showFirstUseHint && !ocrBusy && (
-          <p className="text-center text-[11px] text-slate-400">
-            初回のみOCRエンジン（約9MB）をダウンロードします。次回からはオフラインで利用できます。
-          </p>
-        )}
-
-        {mode === 'ocr' && ocrBusy && ocrProgress && (
-          <div className="flex items-center gap-2 rounded bg-slate-800 px-3 py-1.5 text-[11px] text-cyan-100">
-            <SpinnerIcon className="h-3.5 w-3.5 shrink-0" />
-            <span className="flex-1 truncate">{ocrProgress.status}</span>
-            <span className="tabular-nums">{Math.round(ocrProgress.progress * 100)}%</span>
+        {/* ブラウザ（pnpm dev / GitHub Pages）向けの案内。ML Kit は Capacitor の
+            ネイティブプラグイン経由でしか動かないため、ここでは「使えない」ことと
+            「なぜ使えないか」を明示する。シャッターボタン自体も無効化してあるので
+            (下のボタンの disabled を参照)、押しても何も起きずに困る、という事態を防ぐ。 */}
+        {mode === 'ocr' && !mlkitAvailable && (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-2">
+            <WarningIcon className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            <p className="text-[11px] font-semibold leading-relaxed text-amber-200">
+              OCRはAndroidアプリ版でのみ利用できます。ブラウザでは文字の読み取りはできません。
+            </p>
           </div>
         )}
 
-        {/* OCR結果カード: 直近の読み取り結果と、このアプリで唯一の設定（エンジン・PSM・
-            抽出フィルタ・丁寧に読む）。文字モードだけに属する UI であり、バーコード
-            モードでは（処理中の状態が残っていても）表示しない。 */}
+        {/* OCR結果カード: 直近の読み取り結果と、このアプリで唯一の設定（抽出フィルタ・
+            バーコード自動除外）。文字モードだけに属する UI であり、バーコード
+            モードでは（処理中の状態が残っていても）表示しない。
+            以前はここに「OCRエンジン」（Tesseract/ML Kit）の切り替え、PSM選択、
+            「丁寧に読む」トグルもあったが、tesseract.js を削除してエンジンが
+            ML Kit の1つだけになったため、選ぶ余地の無いこれらの UI は削除した。 */}
         {mode === 'ocr' && !ocrBusy && capturedImage && ocrInfo && (
           <div className="flex flex-col gap-2 rounded-lg bg-slate-800 p-2.5">
             <div className="flex flex-wrap items-center gap-2">
@@ -1336,17 +1320,12 @@ export function SimpleScanScreen() {
               </div>
               <div className="min-w-0 flex-1">
                 <p className="text-[10px] text-slate-500">読み取った画像</p>
-                <p className="truncate text-[11px] text-slate-300">
-                  {ocrInfo.ms}ms
-                  {/* ML Kit は文字ごと・全体としての信頼度スコアを一切返さず、常に0が入る。
-                      そのまま「信頼度 0%」と出すと「まったく読めていない」という逆の
-                      誤解を与えるため、ML Kit のときは数値を出さず注記だけにする
-                      （mlkit.ts / types.ts のコメントを参照）。 */}
-                  {ocrInfo.engine !== 'mlkit' && ` / 信頼度 ${Math.round(ocrInfo.confidence)}%`}
-                </p>
-                {ocrInfo.engine === 'mlkit' && (
-                  <p className="truncate text-[10px] text-slate-500">（ML Kitは信頼度を返しません）</p>
-                )}
+                {/* ML Kit は文字ごと・全体としての信頼度スコアを一切返さず、ocrInfo.confidence には
+                    常に0が入る。そのまま「信頼度 0%」と出すと「まったく読めていない」という
+                    逆の誤解を与えるため、数値は出さず注記だけにする
+                    （mlkit.ts / types.ts のコメントを参照）。 */}
+                <p className="truncate text-[11px] text-slate-300">{ocrInfo.ms}ms</p>
+                <p className="truncate text-[10px] text-slate-500">（ML Kitは信頼度を返しません）</p>
               </div>
               <button
                 type="button"
@@ -1385,10 +1364,10 @@ export function SimpleScanScreen() {
 
             {/* 生テキストは常に表示し続ける。フィルタはあくまで JS側の後処理であって
                 エンジンの認識結果そのものを隠さない（「実際に何が読めたか」を必ず見せる）。
-                怪しいと判定された文字（黄色背景）はタップすると紛らわしい字形の候補
-                （1↔I、0↔O など）に切り替えられる。直した結果はフィルタ後の表示・
-                一覧・コピーにそのまま反映される（元の生テキストの並びはこの表示上でしか
-                変わらず、エンジンが実際に返した文字自体はここでも常に見えている）。 */}
+                下線付きの文字はタップすると紛らわしい字形の候補（1↔I、0↔O など）に
+                切り替えられる。直した結果はフィルタ後の表示・一覧・コピーにそのまま
+                反映される（元の生テキストの並びはこの表示上でしか変わらず、エンジンが
+                実際に返した文字自体はここでも常に見えている）。 */}
             <div className="rounded bg-slate-950 p-2">
               <p className="text-[10px] text-slate-500">生の読み取り結果</p>
               <pre className="whitespace-pre-wrap break-all font-mono text-sm text-slate-100">
@@ -1397,20 +1376,30 @@ export function SimpleScanScreen() {
                 ) : (
                   <OcrRawTextView
                     text={ocrRawText ?? ''}
-                    verdicts={charVerdicts}
                     correctedChars={correctedChars}
                     onToggleChar={handleToggleChar}
                   />
                 )}
               </pre>
-              {charVerdicts.some((v) => v.uncertain) && (
-                <p className="mt-1 text-[10px] text-amber-300">
-                  黄色い文字は読み間違いの可能性があります。タップすると候補（1↔I、0↔Oなど）に切り替えられます。
+              {/* 以前はエンジンが返す文字ごとの信頼度や2パス照合で「怪しい」と判定された
+                  文字だけをこの注記付きで案内していたが、ML Kit は信頼度を返さないため
+                  その判定自体が無くなった。どの文字が怪しいか機械には分からない以上、
+                  下線付きの文字（＝対応表に載っている、字形が紛らわしい文字）は
+                  すべてタップできる、という案内に変えている（OcrRawTextView参照）。 */}
+              {correctedChars !== null && correctedChars.length > 0 && (
+                <p className="mt-1 text-[10px] text-slate-500">
+                  下線の付いた文字はタップすると候補（1↔I、0↔Oなど）に切り替えられます。
                 </p>
               )}
-              {filterMode !== 'raw' && (
+              {/* 整形（ocrTrimSnapshot.enabled）またはフィルタ（filterMode !== 'raw'）の
+                  どちらかが効いていれば、生テキストとは違う値になり得るので分けて見せる。
+                  整形だけが効いていてフィルタが「フィルタなし」のときも、この行が
+                  「一覧に積まれる実際の値」を代表する（displayValueOf と同じ計算）。 */}
+              {(filterMode !== 'raw' || (ocrTrimSnapshot?.enabled ?? false)) && (
                 <>
-                  <p className="mt-1.5 text-[10px] text-slate-500">フィルタ後（{OCR_FILTER_LABELS[filterMode]}）</p>
+                  <p className="mt-1.5 text-[10px] text-slate-500">
+                    整形・フィルタ後{filterMode !== 'raw' && `（${OCR_FILTER_LABELS[filterMode]}）`}
+                  </p>
                   <pre className="whitespace-pre-wrap break-all font-mono text-sm text-cyan-300">
                     {filteredPreview === '' ? '(空文字)' : filteredPreview}
                   </pre>
@@ -1418,76 +1407,13 @@ export function SimpleScanScreen() {
               )}
             </div>
 
-            {/* エンジン切り替え。既存の「画質」「読み取り」（画面下部のセグメント）と
-                同じ見た目に揃える。ML Kit は isMlKitAvailable() が false の環境
-                （ブラウザ）では選べない（ボタンを無効化し、理由を短く添える）。 */}
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center gap-2 text-[11px]">
-                <span className="shrink-0 font-semibold text-slate-400">エンジン</span>
-                <div role="radiogroup" aria-label="OCRエンジン" className="flex flex-1 gap-1 rounded-lg bg-slate-800 p-0.5">
-                  {ENGINE_OPTIONS.map((opt) => {
-                    const optionDisabled = opt.value === 'mlkit' && !isMlKitAvailable()
-                    return (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        role="radio"
-                        aria-checked={engine === opt.value}
-                        disabled={optionDisabled}
-                        onClick={() => handleChangeEngine(opt.value)}
-                        className={`min-h-8 flex-1 rounded-md text-[11px] font-bold transition-colors disabled:opacity-40 ${
-                          engine === opt.value ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 active:bg-slate-700'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-              {!isMlKitAvailable() && (
-                <p className="pl-[3.25rem] text-[10px] text-slate-500">
-                  ML Kitは、Androidアプリ（APK）版でのみ利用できます。ブラウザでは選べません。
-                </p>
-              )}
-            </div>
-
-            <div className="flex gap-2">
-              {engine === 'tesseract' ? (
-                <Select
-                  className="flex-1 min-h-9 text-xs"
-                  value={psm}
-                  onChange={(e) => handleChangePsm(e.target.value as OcrOptions['psm'])}
-                  options={PSM_OPTIONS}
-                  aria-label="PSM選択"
-                />
-              ) : (
-                // ML Kit には PSM という概念が無く、指定しても無視される（types.ts参照）。
-                // 選べても意味が無い設定を出し続けると混乱の元になるため、代わりに
-                // 短い注記だけを同じ位置に置く。
-                <p className="flex flex-1 min-h-9 items-center rounded-lg border border-slate-700 bg-slate-900 px-3 text-[11px] text-slate-500">
-                  ML KitはPSMを使いません
-                </p>
-              )}
-              <Select
-                className="flex-1 min-h-9 text-xs"
-                value={filterMode}
-                onChange={(e) => handleChangeFilterMode(e.target.value as OcrFilterMode)}
-                options={FILTER_OPTIONS}
-                aria-label="抽出フィルタ"
-              />
-            </div>
-
-            {/* 「丁寧に読む」(2パス)。ML Kit にはPSMという概念が無く2パス目を変える
-                手段が無いため意味が無い。engine==='tesseract' のときだけ出す。 */}
-            {engine === 'tesseract' && (
-              <Switch
-                checked={ocrCareful}
-                onChange={handleToggleCareful}
-                label="丁寧に読む（2回読んで突き合わせ）"
-                hint="別のPSMでもう一度認識し、2回の結果が食い違った文字を怪しいとして強調します。認識時間が約2倍になります。"
-              />
-            )}
+            <Select
+              className="min-h-9 text-xs"
+              value={filterMode}
+              onChange={(e) => handleChangeFilterMode(e.target.value as OcrFilterMode)}
+              options={FILTER_OPTIONS}
+              aria-label="抽出フィルタ"
+            />
 
             <Switch
               checked={autoMaskEnabled}
@@ -1533,31 +1459,6 @@ export function SimpleScanScreen() {
             <p className="pl-[3.25rem] text-[10px] text-slate-500">
               {TRIGGER_MODE_OPTIONS.find((opt) => opt.value === triggerMode)?.hint}
             </p>
-          </div>
-        )}
-
-        {/* 画質プリセット: バーコード読み取りの負荷とカメラ解像度のトレードオフ設定。
-            「枠内のみ」のクロップ最適化で足りないときの保険なので、控えめな見た目にする。
-            既定は「最大」（今回の精度改善を退行させないため）。 */}
-        {mode === 'barcode' && (
-          <div className="flex items-center gap-2 text-[11px]">
-            <span className="shrink-0 font-semibold text-slate-400">画質</span>
-            <div role="radiogroup" aria-label="画質" className="flex flex-1 gap-1 rounded-lg bg-slate-800 p-0.5">
-              {CAPTURE_QUALITY_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={camera.quality === opt.value}
-                  onClick={() => handleChangeQuality(opt.value)}
-                  className={`min-h-8 flex-1 rounded-md text-[11px] font-bold transition-colors ${
-                    camera.quality === opt.value ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 active:bg-slate-700'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
           </div>
         )}
 
@@ -1628,18 +1529,6 @@ export function SimpleScanScreen() {
               >
                 {soundEnabled ? <SoundOnIcon className="h-5 w-5" /> : <SoundOffIcon className="h-5 w-5" />}
               </button>
-
-              <button
-                type="button"
-                onClick={handleOpenTrimPanel}
-                aria-label="バーコード値の整形ルールを設定する"
-                aria-pressed={trimRules.enabled}
-                className={`flex min-h-14 items-center justify-center rounded-xl px-3 text-[11px] font-bold ${
-                  trimRules.enabled ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-400'
-                }`}
-              >
-                整形
-              </button>
             </>
           )}
 
@@ -1648,7 +1537,9 @@ export function SimpleScanScreen() {
               variant="primary"
               size="lg"
               loading={ocrBusy}
-              disabled={helpOpen}
+              // ブラウザ（pnpm dev 等）では isMlKitAvailable() が false になり、押しても
+              // 必ず失敗するだけなので、ボタン自体を無効化する（上の案内バナーと対）。
+              disabled={helpOpen || !mlkitAvailable}
               onClick={handleShutterOcr}
               className="flex-1 shadow-xl"
             >
@@ -1732,8 +1623,10 @@ export function SimpleScanScreen() {
         </Suspense>
       )}
 
-      {/* 整形パネル。別チャンクなので、開くまでは読み込まれない。プレビュー欄の初期値には
-          一覧にある直近のバーコード値（元の読み取り値）を渡す（無ければ空欄のまま）。 */}
+      {/* 整形パネル。別チャンクなので、開くまでは読み込まれない。バーコード・OCR共通の
+          ルールを編集するパネルなので、プレビュー欄の初期値には一覧にある直近の結果
+          （バーコード・OCRどちらでも可。一覧は新しい順なので先頭 = 直近）の元の読み取り値を
+          渡す（無ければ空欄のまま）。 */}
       {trimPanelOpen && (
         <Suspense
           fallback={
@@ -1745,7 +1638,7 @@ export function SimpleScanScreen() {
           <TrimPanel
             rules={trimRules}
             onChange={handleChangeTrimRules}
-            previewSeed={results.find((item) => item.source === 'barcode')?.raw ?? null}
+            previewSeed={results[0]?.raw ?? null}
             onClose={handleCloseTrimPanel}
           />
         </Suspense>

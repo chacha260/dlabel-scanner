@@ -99,34 +99,15 @@ const pwaPlugin = VitePWA({
     ],
   },
   workbox: {
-    // 学習データ (eng.traineddata) は非圧縮のまま同梱する方針にしたため（詳細は
-    // ocr.worker.ts の gzip: false のコメントを参照）、'gz' パターンはもう不要になった。
-    // 'traineddata' 拡張子は元から含めており、precache 対象は
-    // globIgnores（下記）で vendor/** ごと除外しているためこのパターンは実質
-    // vendor 以外のファイルにのみ効くが、将来 vendor 以外に .traineddata を
-    // 置く可能性を考慮してパターン自体は残している。
-    globPatterns: ['**/*.{js,css,html,wasm,png,svg,traineddata}'],
-    // tesseract の巨大なエンジン一式（約9MB）は初回インストール時に
-    // 巻き込まないよう precache 対象から除外する（軽量さの要件のため）。
-    globIgnores: ['**/vendor/**'],
+    // 以前は tesseract.js の学習データ (eng.traineddata) 用に 'traineddata' 拡張子を
+    // globPatterns に含め、tesseract 一式（約9MB、public/vendor/tesseract 以下）を
+    // globIgnores で precache 対象から除外し、runtimeCaching で初回アクセス時にだけ
+    // 取得してオフライン再利用する設定をしていた。tesseract.js を完全に削除し
+    // public/vendor 自体が無くなった（OCRエンジンはML Kit、Androidアプリ組み込みの
+    // ネイティブモデルで、Web版の Service Worker がキャッシュすべき対象ではない）
+    // ため、これらは全て不要になった。
+    globPatterns: ['**/*.{js,css,html,wasm,png,svg}'],
     maximumFileSizeToCacheInBytes: 25 * 1024 * 1024,
-    runtimeCaching: [
-      {
-        // OCR を初めて使ったときにだけ取得し、以降はオフラインで再利用できるようにする
-        urlPattern: /\/vendor\/tesseract\//,
-        handler: 'CacheFirst',
-        options: {
-          cacheName: 'tesseract-engine',
-          expiration: {
-            maxEntries: 16,
-            maxAgeSeconds: 60 * 60 * 24 * 365,
-          },
-          cacheableResponse: {
-            statuses: [0, 200],
-          },
-        },
-      },
-    ],
   },
 })
 

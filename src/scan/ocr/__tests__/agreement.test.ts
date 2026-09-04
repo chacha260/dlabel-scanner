@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import {
-  compareOcrPasses,
-  judgeByConfidence,
-  LOW_CONFIDENCE_THRESHOLD,
-  mergeVerdicts,
-  type CharVerdict,
-} from '../agreement'
+import { compareOcrPasses, mergeVerdicts, type CharVerdict } from '../agreement'
+
+// 注意: 以前はここに judgeByConfidence（文字ごとの信頼度による判定）のテストも
+// あったが、tesseract.js の削除に伴い judgeByConfidence 自体を削除したため
+// このファイルからも削除した（agreement.ts のコメント参照）。
+// compareOcrPasses / mergeVerdicts のテストは1件も減らしていない。
 
 function texts(verdicts: CharVerdict[]): string {
   return verdicts.map((v) => v.text).join('')
@@ -15,38 +14,6 @@ function texts(verdicts: CharVerdict[]): string {
 function marks(verdicts: CharVerdict[]): string {
   return verdicts.map((v) => (v.uncertain ? '^' : '.')).join('')
 }
-
-describe('judgeByConfidence', () => {
-  it('しきい値を下回る文字だけを怪しいと判定する', () => {
-    const result = judgeByConfidence([
-      { text: '1', confidence: 95 },
-      { text: 'I', confidence: 40 },
-      { text: '3', confidence: 99 },
-    ])
-    expect(texts(result)).toBe('1I3')
-    expect(marks(result)).toBe('.^.')
-  })
-
-  it('しきい値ちょうどは怪しくない扱いにする（下回った場合のみ怪しい）', () => {
-    const result = judgeByConfidence([{ text: '5', confidence: LOW_CONFIDENCE_THRESHOLD }])
-    expect(marks(result)).toBe('.')
-  })
-
-  it('しきい値を引数で上書きできる', () => {
-    const symbols = [{ text: '7', confidence: 85 }]
-    expect(marks(judgeByConfidence(symbols, 90))).toBe('^')
-    expect(marks(judgeByConfidence(symbols, 80))).toBe('.')
-  })
-
-  it('symbols が空なら空配列を返す（情報が無いことを「全部怪しい」にしない）', () => {
-    expect(judgeByConfidence([])).toEqual([])
-  })
-
-  it('confidence が数値でない壊れた入力でも例外を投げず、怪しくない扱いにする', () => {
-    const result = judgeByConfidence([{ text: '1', confidence: Number.NaN }])
-    expect(marks(result)).toBe('.')
-  })
-})
 
 describe('compareOcrPasses', () => {
   it('2パスが完全に一致すれば、どの文字も怪しくない', () => {

@@ -1,6 +1,8 @@
 // Google ML Kit Text Recognition v2（端末内蔵モデル）による OCR。
-// tesseract.js を置き換えるものではなく、実物の現品票で比較してから採否を決めるための
-// 「2つ目のOCRエンジン」として追加する（呼び出し側で切り替える）。
+// このアプリで唯一の OCR エンジン。以前は tesseract.js（Web Worker 上で動く JS 実装）
+// と併存させ、実物の現品票でどちらが実際に読めるかを比較していたが、比較の結果
+// ML Kit が圧倒的に高精度だったため tesseract.js は完全に削除し、ML Kit だけを使う
+// 方針になった。
 //
 // 前提: このアプリの APK は INTERNET 権限を持たない（docs/apk.md §7）。ML Kit は
 // com.google.mlkit:text-recognition（ビルド時に静的リンクされるモデル）を使うため、
@@ -52,8 +54,8 @@ function createTempFileName(): string {
   return `${TEMP_FILE_DIR}/${crypto.randomUUID()}.jpg`
 }
 
-// ImageData → JPEG Blob。tesseract.js 側（ocr.worker.ts）と同じく OffscreenCanvas
-// 経由で描画する（ImageData を直接エンコードできる API はない）。
+// ImageData → JPEG Blob。ImageData を直接エンコードできる API は無いため、
+// OffscreenCanvas に描画してから convertToBlob で変換する。
 async function imageDataToJpegBlob(image: ImageData): Promise<Blob> {
   const canvas = new OffscreenCanvas(image.width, image.height)
   const ctx = canvas.getContext('2d')
@@ -135,12 +137,6 @@ export async function recognizeWithMlKit(image: ImageData): Promise<OcrResult> {
       // 「信頼度ゼロ＝怪しい」と解釈しないよう扱いを分けること。
       confidence: 0,
       ms: Math.round(performance.now() - startedAt),
-      // ML Kit は文字（グリフ）単位の情報を返さない（TextElement は単語相当の
-      // 粒度までで、その内訳の文字ごとの信頼度は存在しない）ため、
-      // agreement.ts 等の文字単位判定の入力にはできない。空配列は
-      // OcrResult.symbols の契約上「取得できなかった」ことを表す既存の値であり、
-      // 呼び出し側は tesseract.js 由来の結果と同様に空配列でも問題なく動作する。
-      symbols: [],
     }
   } finally {
     // 認識が成功しても失敗しても一時ファイルは必ず削除する。シャッターを押すたびに

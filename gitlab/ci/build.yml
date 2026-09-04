@@ -12,13 +12,11 @@ build:
       export BASE_PATH="$(printf '%s/' "$RAW_PATH" | sed -E 's#//+#/#g')"
       echo "BASE_PATH=$BASE_PATH"
     - pnpm build
-    # OCRエンジン(約16MB)がプリキャッシュに混入すると初回インストールが重くなる。
-    # 設定を1行変えるだけで起きうる事故のため、ここで止める。
-    - |
-      if grep -o 'precacheAndRoute(\[[^]]*\]' dist/sw.js | grep -q 'vendor'; then
-        echo "OCRエンジンがプリキャッシュに含まれています"; exit 1
-      fi
-      echo "OK: プリキャッシュに vendor は含まれていません"
+    # 以前はここに「OCRエンジン(tesseract.js、約16MB)がプリキャッシュに混入していないか」
+    # を確認するチェックがあった（GitHub Actions 側の ci.yml と対になる仕組み）。
+    # tesseract.js を完全に削除し public/vendor 自体が無くなったため、OCRエンジン
+    # （ML Kit）はそもそも Web バンドル・Service Worker のキャッシュ対象になり得ず、
+    # このチェックが守っていた回帰は構造的に発生しなくなったので削除した。
     - du -h dist/assets/* | sort -h
   artifacts:
     paths:

@@ -19,15 +19,7 @@ import {
 import { useCamera } from '../../camera/useCamera'
 import { useBarcodeScanner } from '../../scan/useBarcodeScanner'
 import { isAnyOverlayOpen, isBarcodeScanEnabled } from '../../scan/scanGating'
-import {
-  captureRoi,
-  DEFAULT_OCR_OPTIONS,
-  hasOcrEngineCached,
-  preloadOcr,
-  recognizeCaptured,
-  type OcrProgress,
-  type RoiRect,
-} from '../../scan/ocr'
+import { captureRoi, recognizeCaptured, type RoiRect } from '../../scan/ocr'
 import { Button } from '../components/Button'
 import { Sheet } from '../components/Sheet'
 import {
@@ -87,11 +79,9 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrBusyKey, setOcrBusyKey] = useState<string | null>(null)
   const [ocrInfo, setOcrInfo] = useState<{ ms: number; confidence: number } | null>(null)
-  const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null)
   // シャッターを押した瞬間に確定させた「実際に OCR へ渡す画像」。結果が出たあとも
   // ユーザーが消すか次のシャッターを押すまで表示し続け、同じ画像での再認識にも使う。
   const [capturedImage, setCapturedImage] = useState<ImageData | null>(null)
-  const [showFirstUseHint, setShowFirstUseHint] = useState(!hasOcrEngineCached())
   const [saving, setSaving] = useState(false)
 
   // バーコード検出の一時停止（ユーザーが明示的に操作した場合のみ）。
@@ -104,12 +94,9 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
   const [draftChecked, setDraftChecked] = useState(false)
   const [pendingDraft, setPendingDraft] = useState<ScanDraft | null>(null)
 
-  const preloadTriggeredRef = useRef(false)
-  const ensureOcrPreloaded = useCallback(() => {
-    if (preloadTriggeredRef.current) return
-    preloadTriggeredRef.current = true
-    void preloadOcr((p) => setOcrProgress(p))
-  }, [])
+  // 以前はここに tesseract.js エンジンの事前ダウンロードを済ませておく
+  // ensureOcrPreloaded() があったが、tesseract.js の削除に伴い不要になった
+  // （ML Kit は端末組み込みのモデルで、事前ダウンロードという概念自体が無い）。
 
   // enabled が変わったときだけカメラを起動/停止する。ScanScreen 自体は
   // タブ切り替えでアンマウントされないので、組み立て中のバッファは保持される。
@@ -321,16 +308,10 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
     void clearDraft().catch(() => {})
   }, [])
 
-  // 設定未読み込み時（settings が null）だけ既定値にフォールバックする。
-  // 読み込み済みなら、ユーザーが空欄を選んでいてもそのまま尊重する。
-  // 文字ホワイトリストは LSTM エンジンでは不安定なため OcrOptions から削除済み。
-  // settings.ocrWhitelist 自体は設定画面の項目として残す（配線先がなくなっただけ）。
-  const ocrOptions = useMemo(
-    () => ({
-      psm: settings?.ocrPsm ?? DEFAULT_OCR_OPTIONS.psm,
-    }),
-    [settings],
-  )
+  // 以前はここで settings.ocrPsm から OcrOptions を組み立てていたが、
+  // tesseract.js の削除に伴って OcrOptions 自体（PSMを含む）が無くなったため
+  // 不要になった。settings.ocrPsm / settings.ocrWhitelist 自体は
+  // SettingsScreen.tsx の設定項目として残っている（配線先が無くなっただけ）。
 
   const doSave = useCallback(async () => {
     if (!active || !parsed) return
@@ -369,28 +350,22 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
 
   // 実際に認識にかけている ImageData を渡して結果を rawScans に積む共通処理。
   // シャッター押下の初回認識・「同じ画像で再認識」のどちらからも呼ぶ。
-  const runRecognition = useCallback(
-    (image: ImageData) => {
-      setOcrBusy(true)
-      setOcrProgress(null)
-      recognizeCaptured(image, ocrOptions, (p) => setOcrProgress(p))
-        .then((result) => {
-          setShowFirstUseHint(false)
-          setOcrInfo({ ms: result.ms, confidence: result.confidence })
-          if (result.text.trim().length === 0) {
-            showToast('文字を読み取れませんでした', 'error')
-          } else {
-            setRawScans((prev) => [...prev, { value: result.text, source: 'ocr', at: Date.now() }])
-          }
-        })
-        .catch(() => showToast('OCRに失敗しました', 'error'))
-        .finally(() => {
-          setOcrBusy(false)
-          setOcrProgress(null)
-        })
-    },
-    [ocrOptions],
-  )
+  // recognizeCaptured は ML Kit が使えない環境（ブラウザ）では日本語エラーで
+  // reject するので、そのメッセージをそのままトーストに出す。
+  const runRecognition = useCallback((image: ImageData) => {
+    setOcrBusy(true)
+    recognizeCaptured(image)
+      .then((result) => {
+        setOcrInfo({ ms: result.ms, confidence: result.confidence })
+        if (result.text.trim().length === 0) {
+          showToast('文字を読み取れませんでした', 'error')
+        } else {
+          setRawScans((prev) => [...prev, { value: result.text, source: 'ocr', at: Date.now() }])
+        }
+      })
+      .catch((err: unknown) => showToast(err instanceof Error ? err.message : 'OCRに失敗しました', 'error'))
+      .finally(() => setOcrBusy(false))
+  }, [])
 
   const handleShutterOcr = useCallback(() => {
     const video = camera.videoRef.current
@@ -403,11 +378,10 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
     const image = captureRoi(video, ROI)
     setCapturedImage(image)
     setOcrInfo(null)
-    ensureOcrPreloaded()
     runRecognition(image)
-  }, [camera.videoRef, camera.ready, ensureOcrPreloaded, runRecognition])
+  }, [camera.videoRef, camera.ready, runRecognition])
 
-  // 撮影しなおさず、現在の設定（PSM・ホワイトリスト）で同じ画像を読み直す
+  // 撮影しなおさず同じ画像を読み直す
   const handleRetrySameImage = useCallback(() => {
     if (!capturedImage) return
     runRecognition(capturedImage)
@@ -427,9 +401,8 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
       }
       // こちらもシャッター同様、押した瞬間の映像を同期的に確定させてから認識する
       const image = captureRoi(video, ROI)
-      ensureOcrPreloaded()
       setOcrBusyKey(key)
-      recognizeCaptured(image, ocrOptions)
+      recognizeCaptured(image)
         .then((result) => {
           if (result.text.trim().length === 0) {
             showToast('文字を読み取れませんでした', 'error')
@@ -437,10 +410,10 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
           }
           setFieldOverrides((prev) => ({ ...prev, [key]: { value: result.text, source: 'ocr', at: Date.now() } }))
         })
-        .catch(() => showToast('OCRに失敗しました', 'error'))
+        .catch((err: unknown) => showToast(err instanceof Error ? err.message : 'OCRに失敗しました', 'error'))
         .finally(() => setOcrBusyKey(null))
     },
-    [camera.videoRef, camera.ready, ensureOcrPreloaded, ocrOptions],
+    [camera.videoRef, camera.ready],
   )
 
   const handleManualEdit = useCallback((key: string, value: string) => {
@@ -584,21 +557,10 @@ export function ScanScreen({ enabled }: ScanScreenProps) {
 
       {/* OCR シャッター */}
       <div className="relative z-20 flex flex-col items-center gap-2 px-4 pb-3">
-        {/* 初回利用の案内: エンジンをまだ端末にキャッシュしていないときだけ表示する */}
-        {showFirstUseHint && !ocrBusy && (
-          <p className="max-w-xs text-center text-[11px] text-slate-400">
-            初回のみOCRエンジン（約9MB）をダウンロードします。次回からはオフラインで利用できます。
-          </p>
-        )}
-
-        {/* 進捗表示: ダウンロード・初期化・認識のいずれの段階かを日本語で示す */}
-        {ocrBusy && ocrProgress && (
-          <div className="flex w-full max-w-xs items-center gap-2 rounded bg-slate-900/80 px-3 py-1.5 text-[11px] text-cyan-100">
-            <SpinnerIcon className="h-3.5 w-3.5 shrink-0" />
-            <span className="flex-1 truncate">{ocrProgress.status}</span>
-            <span className="tabular-nums">{Math.round(ocrProgress.progress * 100)}%</span>
-          </div>
-        )}
+        {/* 以前はここに tesseract.js エンジンの初回ダウンロード案内・進捗表示があったが、
+            tesseract.js の削除に伴い不要になった（ML Kit は端末組み込みのモデルで、
+            ダウンロードも進捗という概念も無い。ネイティブプラグイン呼び出し1回で
+            即座に完結する）。認識中はボタンのスピナー（Button の loading）だけで足りる。 */}
 
         {/* 直近の読み取り結果: 実際に認識器へ渡した画像そのものを並べて表示する */}
         {!ocrBusy && capturedImage && ocrInfo && (

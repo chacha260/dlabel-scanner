@@ -89,7 +89,7 @@ export default function LicenseSheet({ onClose }: LicenseSheetProps) {
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
         <div className="space-y-3 border-b border-slate-800 px-5 py-6 text-base leading-relaxed text-slate-200">
           <p>
-            このアプリは、下の一覧に挙げるオープンソースソフトウェア（OCRエンジンの tesseract.js、
+            このアプリは、下の一覧に挙げるオープンソースソフトウェア（OCRエンジンの Google ML Kit、
             バーコード読み取りの zxing-wasm、React など）を利用して作られています。各行をタップすると、
             そのソフトウェアのライセンス本文を開閉できます。
           </p>

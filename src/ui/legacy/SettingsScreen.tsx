@@ -6,7 +6,7 @@ import type { AppSettings } from '../../store/db'
 import { clearRecords, countRecords } from '../../store/records'
 import { useSettings } from '../../store/useStore'
 import { isStoragePersisted, requestStoragePersistence } from '../../store/storagePersistence'
-import { preloadOcr, type OcrProgress } from '../../scan/ocr'
+import { isMlKitAvailable } from '../../scan/ocr'
 import { Button } from '../components/Button'
 import { Field, Select, Switch, TextInput } from '../components/Controls'
 import { Sheet } from '../components/Sheet'
@@ -39,10 +39,6 @@ export function SettingsScreen() {
     setSyncedSettings(settings)
     if (settings) setDedupeLocal(settings.dedupeMs)
   }
-
-  const [ocrDownloading, setOcrDownloading] = useState(false)
-  const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null)
-  const [ocrReady, setOcrReady] = useState(false)
 
   const [clearOpen, setClearOpen] = useState(false)
   const [clearConfirmText, setClearConfirmText] = useState('')
@@ -92,20 +88,9 @@ export function SettingsScreen() {
     dedupeTimerRef.current = window.setTimeout(() => persist({ dedupeMs: v }), 300)
   }
 
-  async function handlePreloadOcr() {
-    setOcrDownloading(true)
-    setOcrProgress(null)
-    try {
-      await preloadOcr((p) => setOcrProgress(p))
-      setOcrReady(true)
-      showToast('OCRエンジンの準備が完了しました', 'success')
-    } catch {
-      showToast('OCRエンジンの準備に失敗しました', 'error')
-    } finally {
-      setOcrDownloading(false)
-      setOcrProgress(null)
-    }
-  }
+  // 以前はここに tesseract.js エンジンの事前ダウンロード（handlePreloadOcr）が
+  // あったが、tesseract.js の削除に伴い不要になった。ML Kit は端末組み込みの
+  // モデルで、ダウンロードという工程自体が無い（下の OCR セクションの表示も参照）。
 
   async function handleClearAll() {
     setClearing(true)
@@ -195,7 +180,12 @@ export function SettingsScreen() {
                 className="font-mono"
               />
             </Field>
-            <Field label="読み取りモード（PSM）">
+            {/* 読み取りモード（PSM）の設定は、tesseract.js 固有の概念だったため
+                現在は配線先が無い（ML Kit は PSM という概念自体を持たない）。
+                ocrWhitelist と同じ理由で項目自体は残してある: 要件が固まって
+                再配線する際に設定値を失わないため。settings.ocrPsm は
+                store/db.ts の AppSettings に引き続き存在する。 */}
+            <Field label="読み取りモード（PSM）" hint="現在は使用されていません（tesseract.js 固有の設定のため）">
               <Select
                 value={settings.ocrPsm}
                 onChange={(e) => persist({ ocrPsm: e.target.value as '6' | '7' | '8' })}
@@ -207,19 +197,14 @@ export function SettingsScreen() {
               />
             </Field>
             <div className="border-t border-slate-700 pt-3">
-              <p className="mb-2 text-xs text-slate-500">
-                OCRエンジンは初回利用時に約9MBダウンロードされます。あらかじめ取得しておくと、電波の悪い倉庫内でも
-                オフラインでOCRが使えるようになります（一度だけで済みます）。
+              <p className="text-xs text-slate-500">
+                {/* tesseract.js を削除し、OCRエンジンは ML Kit（Androidアプリに組み込み済み）
+                    1本になった。ML Kit は端末組み込みのモデルのため、ダウンロードという
+                    工程自体が無く、事前準備ボタンも不要になった。 */}
+                {isMlKitAvailable()
+                  ? 'OCR（ML Kit）は端末に組み込まれているため、事前ダウンロードは不要です。'
+                  : 'OCRはAndroidアプリ版でのみ利用できます。ブラウザでは利用できません。'}
               </p>
-              <Button variant="secondary" size="lg" loading={ocrDownloading} onClick={() => void handlePreloadOcr()}>
-                {ocrDownloading
-                  ? ocrProgress
-                    ? `${ocrProgress.status}…（${Math.round(ocrProgress.progress * 100)}%）`
-                    : '準備中…'
-                  : ocrReady
-                    ? '準備完了（再ダウンロード）'
-                    : 'OCRエンジンを事前ダウンロード'}
-              </Button>
             </div>
           </section>
 

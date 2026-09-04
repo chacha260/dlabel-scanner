@@ -66,7 +66,7 @@ const LICENSE_FILE_RE = /^(licen[cs]e|copying)([._-].*)?$/i
  *
  * `--prod` を付けることで devDependencies（vite, typescript, oxlint など、
  * ビルド成果物には含まれないツール類）を除外し、`--depth Infinity` で
- * 推移的依存（tesseract.js が引き連れる bmp-js 等）まで含める。
+ * 推移的依存まで含める。
  */
 function collectProductionDependencies() {
   const raw = execFileSync(
@@ -180,19 +180,17 @@ function buildEntryFromPackageDir(name, version, dir) {
 }
 
 // ---------------------------------------------------------------------------
-// public/vendor/ 以下に手動でベンダリングされている配布物向けの手書きエントリ。
+// npm の依存解決（pnpm ls）には出てこないが、実際のビルド成果物には
+// 含まれる配布物向けの手書きエントリ。
 //
-// これらは npm の依存解決（pnpm ls）には出てこない（ビルド時に vite が
-// node_modules から拾うのではなく、開発者が事前にダウンロードして
-// public/vendor/tesseract/ に置いたバイナリ／学習データのため）。しかし
-// APK / PWA の成果物には実際に同梱され、かつサイズが大きいためユーザーが
-// 実体を意識する対象でもあるので、npm パッケージと同格に一覧へ混ぜ込む。
+// 以前はここに public/vendor/tesseract/ 以下（tesseract.js の worker.min.js・
+// tesseract.js-core の wasm 一式・tessdata_best の英語学習データ）の
+// 手書きエントリもあったが、tesseract.js を完全に削除し public/vendor 自体が
+// 無くなったため削除した。
 //
-// 出自:
-//   - worker.min.js              … tesseract.js（Apache-2.0）の配布物
-//   - tesseract-core-*.wasm(.js) … tesseract.js-core（Apache-2.0）の配布物
-//   - tessdata/eng.traineddata   … tessdata_best 由来（Apache-2.0, Google /
-//                                   tesseract-ocr）の英語学習データ
+// 現在ここに残っているのは:
+//   - Google ML Kit Text Recognition v2 … Android のネイティブ依存として
+//     APK に静的リンクされ、pnpm の依存解決には出てこない（Gradle 依存のため）
 //   - zxing-wasm 同梱の zxing_reader.wasm … zxing-cpp（Apache-2.0）由来
 //
 // 本文は各プロジェクトが採用している Apache License 2.0 の正式な全文
@@ -377,30 +375,6 @@ const APACHE_2_0_TEXT = `                                 Apache License
    END OF TERMS AND CONDITIONS`
 
 const MANUAL_VENDOR_ENTRIES = [
-  {
-    name: 'tesseract.js (worker.min.js)',
-    version: '7.0.0',
-    spdx: 'Apache-2.0',
-    author: 'tesseract.js contributors (naptha)',
-    homepage: 'https://github.com/naptha/tesseract.js',
-    licenseText: `【同梱物について】\npublic/vendor/tesseract/worker.min.js は npm パッケージ tesseract.js の\n配布物（Web Worker 本体）を手動でダウンロードして同梱したものです。\npnpm の依存解決には出てきませんが、実際にビルド成果物へ含まれるため\n本一覧に手書きで追加しています。ライセンス本文は tesseract.js 本体と\n同じ Apache License 2.0 です。\n\n${APACHE_2_0_TEXT}`,
-  },
-  {
-    name: 'tesseract.js-core (tesseract-core-*.wasm)',
-    version: '7.0.0',
-    spdx: 'Apache-2.0',
-    author: 'tesseract.js-core contributors (naptha)',
-    homepage: 'https://github.com/naptha/tesseract.js-core',
-    licenseText: `【同梱物について】\npublic/vendor/tesseract/ 以下の次の4ファイルは、npm パッケージ\ntesseract.js-core の配布物（WebAssembly 版 Tesseract OCR エンジン本体）を\n手動でダウンロードして同梱したものです。pnpm の依存解決には出てきませんが、\n実際にビルド成果物へ含まれるため本一覧に手書きで追加しています。\n\n  - tesseract-core-lstm.wasm\n  - tesseract-core-lstm.wasm.js\n  - tesseract-core-simd-lstm.wasm\n  - tesseract-core-simd-lstm.wasm.js\n\nライセンス本文は tesseract.js-core 本体と同じ Apache License 2.0 です。\n\n${APACHE_2_0_TEXT}`,
-  },
-  {
-    name: 'eng.traineddata (tessdata_best)',
-    version: 'tessdata_best',
-    spdx: 'Apache-2.0',
-    author: 'Google / tesseract-ocr contributors',
-    homepage: 'https://github.com/tesseract-ocr/tessdata_best',
-    licenseText: `【同梱物について】\npublic/vendor/tesseract/tessdata/eng.traineddata は、Tesseract OCR の\n英語用学習済みモデル（tessdata_best リポジトリ由来）を手動でダウンロード\nして同梱したものです。npm パッケージではなく pnpm の依存解決には出てきま\nせんが、OCR機能の実行に必須のバイナリであり、実際にビルド成果物へ含まれる\nため本一覧に手書きで追加しています。ライセンスは配布元 tessdata_best と\n同じ Apache License 2.0 です。\n\n${APACHE_2_0_TEXT}`,
-  },
   {
     // ML Kit は npm パッケージ（@capacitor-mlkit/text-recognition）とは別に、
     // Android のネイティブ依存（com.google.mlkit:text-recognition）として

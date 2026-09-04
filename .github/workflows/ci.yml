@@ -76,22 +76,22 @@ jobs:
           BASE_PATH: ${{ github.event.repository.name == format('{0}.github.io', github.repository_owner) && '/' || format('/{0}/', github.event.repository.name) }}
 
       - name: バンドルサイズを表示
+        # 以前はここに tesseract.js のエンジン一式（public/vendor/tesseract、約9MB）の
+        # サイズも表示していたが、tesseract.js を完全に削除し public/vendor 自体が
+        # 無くなったため削除した（dist/vendor が存在せず du がエラーになる）。
         run: |
           echo "### バンドル構成" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           du -h dist/assets/* dist/index.html 2>/dev/null | sort -h >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "OCRエンジン(遅延取得): $(du -sh dist/vendor | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Service Worker が OCR エンジンをプリキャッシュしていないことを確認
-        # 9.4MB の OCR エンジンが初回インストール時に落ちてくると
-        # 「軽さ」の要件を満たさないため、CI で回帰を防ぐ
-        run: |
-          if grep -o 'precacheAndRoute(\[[^]]*\]' dist/sw.js | grep -q 'vendor'; then
-            echo "::error::OCRエンジンがプリキャッシュに含まれています"
-            exit 1
-          fi
-          echo "OK: プリキャッシュに vendor は含まれていません"
+      # 以前はここに「Service Worker が OCR エンジンをプリキャッシュしていないことを確認」
+      # というゲートがあった（tesseract.js 一式・約9MBが初回インストール時に落ちてきて
+      # 「軽さ」の要件を満たさなくなる回帰を防ぐためのもの）。tesseract.js を完全に
+      # 削除して以降、OCRエンジン（ML Kit）はAndroidアプリのネイティブ側に組み込まれる
+      # ものであり、そもそも Web バンドル・Service Worker のキャッシュ対象になり得ない
+      # （public/vendor 自体が存在しない）。このゲートが守っていた回帰は構造的に
+      # 発生しなくなったため、意味のあるチェックとして書き直すことができず削除した。
 
       - name: Pages 用にアップロード
         if: github.ref == 'refs/heads/main'

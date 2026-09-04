@@ -36,8 +36,9 @@ import type { BarcodeBackend, BarcodeHit, BarcodeReader, NormalizedRect } from '
 import { computeCropSize, CROP_PIXEL_BUDGET_PX, resolveBarcodeCropPlan } from './barcode/crop'
 import { computeDownscaledSize } from './barcode/scale'
 // ROI の表示座標→映像座標への変換は geometry.ts の1箇所だけに閉じ込める
-// （ocr/index.ts は tesseract 一式を含む重いモジュールのため、型と変換関数だけを
-// 直接ファイルから import し、余計な依存をこのフレームループに持ち込まない）。
+// （ocr/index.ts は OCR まわりの諸機能を再エクスポートする集約モジュールのため、
+// 型と変換関数だけを直接ファイルから import し、余計な依存をこのフレームループに
+// 持ち込まない）。
 import { mapCoverRectToVideo } from './ocr/geometry'
 import type { RoiRect } from './ocr/types'
 

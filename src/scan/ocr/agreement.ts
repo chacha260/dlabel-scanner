@@ -8,9 +8,17 @@
 //
 // そこで方針を「間違えないようにする」から「**間違えたかもしれない箇所を人に見せる**」
 // へ広げる。現場の人が一瞬で直せるなら、実用上の精度としてはそのほうが効く。
-// 「怪しい」の根拠は2種類あり、このモジュールはその両方を扱う。
+//
+// 「怪しい」の根拠はもともと2種類あった:
 //   1. エンジンが返す文字ごとの信頼度が低い（judgeByConfidence）
-//   2. PSM を変えた2回の認識で結果が食い違った（compareOcrPasses）
+//   2. 2回の認識で結果が食い違った（compareOcrPasses）
+// tesseract.js を削除して ML Kit 1本にした結果、1. は完全に成立しなくなった
+// （ML Kit は文字ごとの信頼度はおろか、全体の信頼度スコアすら一切返さない。
+// mlkit.ts / types.ts のコメントを参照）。判定材料が無いまま関数だけ残しても
+// 呼び出しようがないため judgeByConfidence は削除した。2. の compareOcrPasses は
+// エンジン非依存（2回のテキストを突き合わせるだけ）で今後も使うため残す。
+// 次の予定は「PSM を変えた2パス」ではなく「前処理を変えた2パス（素の画像 vs
+// コントラスト補正）」で同じ仕組みを使うこと。
 
 /** 1文字ぶんの判定結果 */
 export type CharVerdict = {
@@ -18,37 +26,6 @@ export type CharVerdict = {
   text: string
   /** 怪しい（人が確認したほうがよい）と判定されたか */
   uncertain: boolean
-}
-
-// エンジンが返す文字ごとの信頼度が、この値を下回ったら「怪しい」とみなす。
-//
-// tesseract.js（Word.symbols[].confidence）の信頼度は 0..100 のスケールで返る。
-// 80 という値の根拠: はっきり読めている文字はおおむね 90 以上に張り付き、
-// 字形が紛らわしい文字や潰れた文字で目に見えて下がる、という一般的な傾向に
-// 基づく初期値であり、**実物の現品票で測って決めた値ではない**。
-// 高くしすぎると全部が怪しい扱いになって「強調」の意味が無くなり、
-// 低くしすぎると本当に怪しい文字を見逃す。実機で調整すること。
-export const LOW_CONFIDENCE_THRESHOLD = 80
-
-/**
- * 文字ごとの信頼度から「怪しい文字」を判定する。
- *
- * symbols が空（エンジンが文字単位の情報を返さなかった場合。ocr.worker.ts の
- * コメント参照）のときは、判定材料が無いので **何も怪しくない扱い** にする。
- * 「情報が取れない」ことを「全部怪しい」に変換すると、画面が真っ赤になるだけで
- * 何の情報にもならないため。
- */
-export function judgeByConfidence(
-  symbols: { text: string; confidence: number }[],
-  threshold: number = LOW_CONFIDENCE_THRESHOLD,
-): CharVerdict[] {
-  if (!Array.isArray(symbols) || symbols.length === 0) return []
-  const safeThreshold = Number.isFinite(threshold) ? threshold : LOW_CONFIDENCE_THRESHOLD
-  return symbols.map((symbol) => ({
-    text: symbol.text,
-    // confidence が数値でない（壊れた入力）場合は判定材料にならないので怪しくない扱い
-    uncertain: Number.isFinite(symbol.confidence) && symbol.confidence < safeThreshold,
-  }))
 }
 
 /**
@@ -71,8 +48,8 @@ export function compareOcrPasses(primary: string, secondary: string): CharVerdic
   const b = Array.from(secondary)
 
   if (a.length === 0) return []
-  // 裏取りの材料が無い場合は「怪しくない」扱いにする（judgeByConfidence と同じ理由。
-  // 情報が無いことを「全部怪しい」に変換しない）。
+  // 裏取りの材料が無い場合は「怪しくない」扱いにする（情報が無いことを
+  // 「全部怪しい」に変換しない、という一貫した方針のため）。
   if (b.length === 0) return a.map((text) => ({ text, uncertain: false }))
 
   // LCS の長さ表。dp[i][j] = a[i..] と b[j..] の最長共通部分列の長さ
@@ -112,14 +89,21 @@ export function compareOcrPasses(primary: string, secondary: string): CharVerdic
 }
 
 /**
- * 信頼度による判定と2パス照合の結果を統合する。
- * どちらか一方でも「怪しい」と言っていれば怪しい扱いにする（見逃すより出しすぎるほうが安全）。
+ * 2種類の判定結果を統合する。どちらか一方でも「怪しい」と言っていれば怪しい扱いにする
+ * （見逃すより出しすぎるほうが安全）。
  *
- * 2つの配列は同じ文字列から作られているとは限らない（symbols はエンジンが
- * 認識した文字の並びで、空白の扱いなどが text と一致しないことがある）。
- * そのため文字位置での単純な重ね合わせはせず、**長さが一致するときだけ**統合し、
- * 一致しない場合は基準となる byPasses 側をそのまま返す。
- * 無理に位置合わせして誤った位置を強調するくらいなら、片方の情報を捨てるほうがよい。
+ * もともとは compareOcrPasses（2パス照合）と judgeByConfidence（文字ごとの信頼度）の
+ * 結果を統合するために作った関数だったが、tesseract.js の削除に伴って
+ * judgeByConfidence 自体を削除したため、現時点でこの関数を実際に呼ぶ箇所は無い。
+ * それでも汎用の「2つの CharVerdict[] を安全にORで統合する」関数として残す
+ * （引数名は当時の名残りだが、判定の根拠が何であるかには依存しない実装のため
+ * そのまま使える）。次に予定している「前処理を変えた2パス」同士の統合にも
+ * そのまま流用できる。
+ *
+ * 2つの配列は同じ文字列から作られているとは限らない。そのため文字位置での
+ * 単純な重ね合わせはせず、**長さが一致するときだけ**統合し、一致しない場合は
+ * 基準となる byPasses 側をそのまま返す。無理に位置合わせして誤った位置を
+ * 強調するくらいなら、片方の情報を捨てるほうがよい。
  */
 export function mergeVerdicts(byPasses: CharVerdict[], byConfidence: CharVerdict[]): CharVerdict[] {
   if (byConfidence.length === 0) return byPasses

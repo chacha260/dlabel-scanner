@@ -3,7 +3,6 @@
 
 import type { CaptureQuality } from '../camera/quality'
 import type { OcrFilterMode } from '../scan/ocr/postprocess'
-import type { OcrEngineId, OcrOptions } from '../scan/ocr/types'
 import { DEFAULT_OCR_PREPROCESS_OPTIONS, type OcrPreprocessOptions } from '../scan/ocr/preprocess'
 import type { BarcodeTriggerMode, ScanMode } from '../scan/scanGating'
 import { DEFAULT_BARCODE_TRIGGER_MODE } from '../scan/scanGating'
@@ -59,31 +58,6 @@ export function saveBarcodeTriggerMode(mode: BarcodeTriggerMode): void {
   }
 }
 
-const OCR_PSM_STORAGE_KEY = 'dlabel.ocrPsm'
-
-/**
- * OCR の PSM（Page Segmentation Mode）。これまで結果カード上の選択は保存されず、
- * シャッターのたびに既定の「単一行」へ戻っていた。現場では読む対象の形（1行の品番か、
- * 複数行のブロックか）はほぼ固定なので、毎回選び直させる理由がない。
- * 保存値が無い・壊れている場合は従来の既定である '7'（単一行）とする。
- */
-export function loadOcrPsm(): OcrOptions['psm'] {
-  try {
-    const raw = localStorage.getItem(OCR_PSM_STORAGE_KEY)
-    return raw === '8' || raw === '6' ? raw : '7'
-  } catch {
-    return '7'
-  }
-}
-
-export function saveOcrPsm(psm: OcrOptions['psm']): void {
-  try {
-    localStorage.setItem(OCR_PSM_STORAGE_KEY, psm)
-  } catch {
-    // 保存できなくても致命的ではないため無視する
-  }
-}
-
 const OCR_FILTER_MODE_STORAGE_KEY = 'dlabel.ocrFilterMode'
 
 /**
@@ -108,60 +82,12 @@ export function saveOcrFilterMode(mode: OcrFilterMode): void {
   }
 }
 
-const OCR_CAREFUL_STORAGE_KEY = 'dlabel.ocrCareful'
-
-/**
- * 「丁寧に読む」モード。ON のとき PSM を変えて2回認識し、文字単位で突き合わせて
- * 一致しなかった位置を「怪しい」として強調する。認識時間が約2倍になるため
- * 既定は OFF（従来どおりの1パス）とし、読みにくいラベルのときだけ使ってもらう。
- */
-export function loadOcrCareful(): boolean {
-  try {
-    return localStorage.getItem(OCR_CAREFUL_STORAGE_KEY) === 'true'
-  } catch {
-    return false
-  }
-}
-
-export function saveOcrCareful(enabled: boolean): void {
-  try {
-    localStorage.setItem(OCR_CAREFUL_STORAGE_KEY, String(enabled))
-  } catch {
-    // 保存できなくても致命的ではないため無視する
-  }
-}
-
-const OCR_ENGINE_STORAGE_KEY = 'dlabel.ocrEngine'
-
-/**
- * OCRエンジンの選択（Tesseract / ML Kit）。保存値が無い・壊れている場合は
- * 'tesseract' を既定とする（ブラウザでも APK でも動く唯一のエンジンであり、
- * これまでの唯一の挙動だったため）。
- *
- * 注意: ここでは保存値をそのまま返すだけで、「今の実行環境で ML Kit が実際に
- * 使えるか」の検証はしない（isMlKitAvailable() は Capacitor 依存であり、
- * localStorage の読み書きだけを扱うこのファイルに持ち込みたくないため）。
- * 別端末で 'mlkit' を選んで保存した設定が、ML Kit の無いブラウザや端末に
- * そのまま同期されてくることがあるので、呼び出し側（SimpleScanScreen.tsx）で
- * isMlKitAvailable() を見て 'tesseract' にフォールバックすること。
- */
-export function loadOcrEngine(): OcrEngineId {
-  try {
-    const raw = localStorage.getItem(OCR_ENGINE_STORAGE_KEY)
-    return raw === 'mlkit' ? 'mlkit' : 'tesseract'
-  } catch {
-    // プライベートブラウジング等で読めなくても既定値（tesseract）で動作させる
-    return 'tesseract'
-  }
-}
-
-export function saveOcrEngine(engine: OcrEngineId): void {
-  try {
-    localStorage.setItem(OCR_ENGINE_STORAGE_KEY, engine)
-  } catch {
-    // 保存できなくても致命的ではないため無視する
-  }
-}
+// 注意: 以前はここに「丁寧に読む」(ocrCareful: PSMを変えて2パス認識する設定)と
+// 「OCRエンジン選択」(ocrEngine: tesseract / mlkit)の保存関数があったが、
+// どちらも tesseract.js の削除に伴って意味を失ったため削除した。
+// - ocrCareful は「2回目にPSMを変える」実装だったため、PSM自体が無い ML Kit
+//   単独構成では成立しない（前処理を変えた2パスとして作り直すのは別の作業）。
+// - ocrEngine はエンジンが ML Kit の1つだけになったため選択の余地が無い。
 
 const OCR_PREPROCESS_STORAGE_KEY = 'dlabel.ocrPreprocess'
 

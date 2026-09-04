@@ -1,6 +1,12 @@
 // OCR 機能の唯一の入口。シャッター操作など、明示的に呼ばれたときだけ実行する
-// （フレームループには絶対に組み込まない）。ワーカーはモジュール単位の
-// 遅延シングルトンとして、初回呼び出し時にのみ生成する。
+// （フレームループには絶対に組み込まない）。
+//
+// 以前は tesseract.js（Web Worker 上で動く JS 実装）と ML Kit の2エンジンを
+// 併存させ、現場の現品票でどちらが実際に読めるかを比較していた。実機比較の結果
+// ML Kit が圧倒的に高精度だったため、tesseract.js は完全に削除し、以後は
+// ML Kit（Capacitor のネイティブプラグイン経由、APK でのみ動作）だけを使う。
+// これにより「初回だけ約9MBのエンジンをダウンロードする」「Web Worker を起動して
+// 進捗を逐次受け取る」といった tesseract.js 固有の配管はすべて不要になった。
 
 import type { NormalizedRect } from '../barcode/types'
 export type { NormalizedRect } from '../barcode/types'
@@ -9,11 +15,10 @@ import { boxesToMask } from './mask'
 import { preprocessRoi, trimBarcodeBoxesToStripes } from './preprocess'
 import type { OcrPreprocessOptions } from './preprocess'
 import { DEFAULT_OCR_PREPROCESS_OPTIONS } from './preprocess'
-import { recognizeWithMlKit } from './mlkit'
-import type { OcrOptions, OcrResult, RoiRect } from './types'
+import { isMlKitAvailable, recognizeWithMlKit } from './mlkit'
+import type { OcrResult, RoiRect } from './types'
 
-export { DEFAULT_OCR_OPTIONS } from './types'
-export type { OcrEngineId, OcrOptions, OcrResult, OcrSymbol, RoiRect } from './types'
+export type { OcrResult, RoiRect } from './types'
 // ML Kit が使えるかどうかの判定だけを通す（実体は mlkit.ts。ブラウザでは常に false）。
 export { isMlKitAvailable } from './mlkit'
 export {
@@ -26,9 +31,12 @@ export {
 export type { OcrPreprocessOptions } from './preprocess'
 export { applyOcrFilter, correctDigitConfusions, filterAlnumOnly, filterDigitsOnly, OCR_FILTER_LABELS } from './postprocess'
 export type { OcrFilterMode } from './postprocess'
-// 「どの文字が怪しいか」の判定（文字ごとの信頼度 / 2パス照合）。判定は純粋関数として
-// agreement.ts に閉じ込めてあり、ここでは UI から使えるように通すだけ。
-export { compareOcrPasses, judgeByConfidence, LOW_CONFIDENCE_THRESHOLD, mergeVerdicts } from './agreement'
+// 「どの文字が怪しいか」の判定（2パス照合）。判定は純粋関数として agreement.ts に
+// 閉じ込めてあり、ここでは UI から使えるように通すだけ。
+// 注意: 以前はここに文字ごとの信頼度による判定（judgeByConfidence）も含まれていたが、
+// ML Kit は信頼度を一切返さないため機能せず削除した（agreement.ts のコメント参照）。
+// compareOcrPasses / mergeVerdicts は前処理を変えた2パスの食い違い検出に使うため残す。
+export { compareOcrPasses, mergeVerdicts } from './agreement'
 export type { CharVerdict } from './agreement'
 export { boxesToMask, DEFAULT_MASK_MARGIN, expandRect, normalizedRectToPixels, rectsOverlap } from './mask'
 export type { PixelRect } from './mask'
@@ -48,107 +56,12 @@ export {
 } from './roi'
 export type { HandleId } from './roi'
 
-// OCR エンジンのダウンロード/初期化/認識の進捗。progress は 0..1、status は日本語の表示文言。
-export type OcrProgress = { status: string; progress: number }
-
-type RecognizeRequest = { type: 'recognize'; id: number; imageData: ImageData; options: OcrOptions }
-type TerminateRequest = { type: 'terminate' }
-type WarmupRequest = { type: 'warmup'; id: number }
-type ResultResponse = { type: 'result'; id: number; result: OcrResult }
-type ErrorResponse = { type: 'error'; id: number; message: string }
-// error はワーカー側 (ocr.worker.ts) の handleWarmup が学習データ読み込み等の失敗を
-// 伝えるための追加フィールド。'warmup-done' というメッセージ種別自体は変わらない。
-type WarmupDoneResponse = { type: 'warmup-done'; id: number; error?: string }
-type ProgressResponse = { type: 'progress'; id: number; status: string; progress: number }
-type Response = ResultResponse | ErrorResponse | WarmupDoneResponse | ProgressResponse
-
-let ocrWorker: Worker | null = null
-let nextId = 0
-const pending = new Map<number, (response: Response) => void>()
-const progressListeners = new Map<number, (progress: OcrProgress) => void>()
-
-// OCRエンジン一式（約9MB）を初回に取得済みかどうかを端末に記録する。
-// 「初回だけ時間がかかる」旨の案内をいつ出すかの判定にのみ使う軽量なフラグ。
-const OCR_ENGINE_CACHED_KEY = 'dlabel-scanner:ocrEngineCached'
-
-export function hasOcrEngineCached(): boolean {
-  try {
-    return localStorage.getItem(OCR_ENGINE_CACHED_KEY) === '1'
-  } catch {
-    // プライベートブラウジング等で localStorage が使えない場合は
-    // 「まだキャッシュされていない」扱いにしておく（案内が余分に出るだけで害はない）
-    return false
-  }
-}
-
-function markOcrEngineCached(): void {
-  try {
-    localStorage.setItem(OCR_ENGINE_CACHED_KEY, '1')
-  } catch {
-    // 保存できなくても致命的ではないため無視する
-  }
-}
-
-function ensureWorker(): Worker {
-  if (!ocrWorker) {
-    // tesseract.js 本体はこのワーカーの中でさらに遅延 import されるため、
-    // ここではワーカースクリプトを起動するだけで初期バンドルは汚れない
-    const worker = new Worker(new URL('./ocr.worker.ts', import.meta.url), { type: 'module' })
-    worker.addEventListener('message', (event: MessageEvent<Response>) => {
-      const data = event.data
-      if (data.type === 'progress') {
-        progressListeners.get(data.id)?.({ status: data.status, progress: data.progress })
-        return
-      }
-      const resolve = pending.get(data.id)
-      if (!resolve) return
-      pending.delete(data.id)
-      progressListeners.delete(data.id)
-      resolve(data)
-    })
-    ocrWorker = worker
-  }
-  return ocrWorker
-}
-
-// preloadOcr の結果。warmup が失敗した場合でも preloadOcr 自体は reject させない
-// （呼び出し側は SimpleScanScreen.tsx で `void preloadOcr(...)` と呼び捨てにしており、
-// reject させると unhandled rejection になってしまうため）。失敗した理由を知りたい
-// 呼び出し側だけが ok / error を見ればよく、見なくても既存の `void preloadOcr(...)`
-// という呼び方はそのまま動く。
-export type OcrPreloadResult = { ok: true } | { ok: false; error: string }
-
-// OCR モードに入った時点などで呼んでおくと、tesseract エンジンの初期化を
-// 先に済ませ、実際のシャッター時の待ち時間を減らせる。
-// 学習データの読み込み失敗など、初期化に失敗した場合も本関数は reject しない
-// （上記 OcrPreloadResult のコメントを参照）。失敗しても以降の実際の認識要求
-// （recognizeCaptured）では改めて初期化が試みられ、そこでは通常どおり reject する。
-export async function preloadOcr(onProgress?: (progress: OcrProgress) => void): Promise<OcrPreloadResult> {
-  const worker = ensureWorker()
-  const id = nextId++
-  if (onProgress) progressListeners.set(id, onProgress)
-  return new Promise<OcrPreloadResult>((resolve) => {
-    pending.set(id, (response) => {
-      if (response.type === 'warmup-done' && response.error) {
-        resolve({ ok: false, error: response.error })
-        return
-      }
-      markOcrEngineCached()
-      resolve({ ok: true })
-    })
-    const message: WarmupRequest = { type: 'warmup', id }
-    worker.postMessage(message)
-  })
-}
-
-// 「今まさに OCR にかけようとしている画像」をシャッター押下の瞬間に同期的に確定させる。
-// 前処理（グレースケール化・スケーリング）まで済ませた ImageData を返すので、
-// 呼び出し側はこれをそのままプレビュー用サムネイルとしても、認識結果の検証用にも使える。
-//
-// roi は「画面に表示している枠」に対する割合（表示座標）で受け取り、ここで映像の
-// 実解像度上の範囲（映像座標）へ変換する。object-fit: cover による切り落としを
-// 考慮しないと、画面の枠と実際に切り出される範囲がずれるため、変換は必ずここを通す。
-// maskRects を渡す場合は、映像座標（フレーム全体に対する 0..1）で指定すること。
+// シャッターを押した「その瞬間」の映像から、ROI（表示座標）で指定した範囲を
+// 前処理込みで切り出す。roi は「画面に表示している枠」に対する割合（表示座標）で
+// 受け取り、ここで映像の実解像度上の範囲（映像座標）へ変換する。object-fit: cover
+// による切り落としを考慮しないと、画面の枠と実際に切り出される範囲がずれるため、
+// 変換は必ずここを通す。maskRects を渡す場合は、映像座標（フレーム全体に対する
+// 0..1）で指定すること。
 export function captureRoi(
   source: HTMLVideoElement,
   roi: RoiRect,
@@ -218,20 +131,18 @@ export function cropVideoSpaceRoi(
  * なぜこれが要るのか（重要）:
  * preprocessRoi のパイプライン（グレースケール化・コントラスト正規化・罫線除去・
  * そして computeOcrScale による「文字行の高さが TARGET_ROI_HEIGHT_PX=96px に
- * なるまでの縮小」）は、すべて **tesseract.js の LSTM エンジンに合わせて**
- * 調整したものである。Tesseract はスキャンした書類向けのエンジンで、
- * 小さめ・高コントラストのグレースケール画像を好むため、この前処理が効く。
+ * なるまでの縮小」）は、もともと tesseract.js の LSTM エンジンに合わせて
+ * 調整したものだった。Tesseract はスキャンした書類向けのエンジンで、
+ * 小さめ・高コントラストのグレースケール画像を好むため、この前処理が効いていた。
  *
  * ところが ML Kit は逆で、**カメラで撮った自然な写真**で学習されている。
  * 同じ画像を渡すと、
  *   - 96px まで縮小されたことで細部の情報が失われる
  *   - グレースケール化・コントラスト伸長で、モデルが期待する画素分布から外れる
- * という二重の不利を負う。つまり「ML Kit のほうが精度が低い」という比較結果が
- * 出たとしても、それが **エンジンの実力差なのか、Tesseract 向けの前処理を
- * 押し付けたせいなのか区別がつかない**。それでは比較する意味がない。
- *
- * そのため ML Kit へ渡す経路では、この関数で「切り出しただけ」の画像を作り、
- * 前処理の有無そのものも比較軸として扱えるようにする。
+ * という二重の不利を負う。tesseract.js は削除したが、この差自体は無くなって
+ * いないため、ML Kit へ渡す経路では引き続きこの関数で「切り出しただけ」の
+ * 画像を作り、前処理の有無そのものを比較軸として扱えるようにする
+ * （比較モード src/ui/OcrCompareSheet.tsx で「素の画像」対「前処理あり」を比べる）。
  *
  * maskRects（バーコードのマスク）だけは前処理とは別の話（読ませたくない領域を
  * 隠すという意図的な操作）なので、渡された場合はここでも塗りつぶす。
@@ -300,78 +211,19 @@ export async function captureRoiWithBarcodeMask(
   return { image, maskedCount: maskRects.length, maskRects }
 }
 
-// captureRoi で得た画像を認識する。同じ ImageData を使い回して
-// （PSM/ホワイトリストを変えながら）何度でも再認識できるよう、
-// ワーカーへは複製したバッファを転送し、呼び出し元の image は破壊しない。
-export async function recognizeCaptured(
-  image: ImageData,
-  options: OcrOptions,
-  onProgress?: (progress: OcrProgress) => void,
-): Promise<OcrResult> {
-  // エンジンの振り分けはここ1箇所だけで行う。ML Kit は Capacitor の
-  // ネイティブプラグイン呼び出しであって Web Worker を使わないため、
-  // ワーカーへ postMessage する経路には一切入らせない
-  // （ワーカーを起動すると tesseract 一式の遅延 import が走ってしまい、
-  // ML Kit だけ使いたい端末でも約9MBのエンジンを読み込む羽目になる）。
-  if (options.engine === 'mlkit') {
-    // 進捗の概念が無い（プラグイン呼び出し1回で完結する）ため、
-    // 呼び出し側の進捗表示が固まって見えないよう、開始と完了だけ通知する。
-    onProgress?.({ status: '文字を認識中', progress: 0 })
-    try {
-      return await recognizeWithMlKit(image)
-    } finally {
-      onProgress?.({ status: '文字を認識中', progress: 1 })
-    }
+// captureRoi で得た画像を認識する。エンジンは ML Kit の1つだけになったため、
+// 以前あったエンジン振り分け・Web Worker への postMessage・進捗通知の配管は
+// すべて不要になった（ML Kit はネイティブプラグインの呼び出し1回で完結し、
+// 進捗という概念自体を持たない）。
+export async function recognizeCaptured(image: ImageData): Promise<OcrResult> {
+  if (!isMlKitAvailable()) {
+    // ML Kit は Capacitor のネイティブプラグイン経由でしか動かないため、ブラウザ
+    // （pnpm dev や GitHub Pages 等）で呼ばれると本来は成立しない。ここで弾かずに
+    // recognizeWithMlKit まで進めると、プラグイン未実装による分かりにくい例外
+    // （あるいは無反応）になりかねないため、現場でも一目で原因が分かる日本語の
+    // エラーとしてここで確実に失敗させる。呼び出し側（UI）は isMlKitAvailable()
+    // を見てシャッター自体を無効化するが、その二重の安全策としてここでも自衛する。
+    throw new Error('OCRはAndroidアプリ版でのみ利用できます')
   }
-
-  const worker = ensureWorker()
-  const id = nextId++
-  if (onProgress) progressListeners.set(id, onProgress)
-
-  // postMessage の第2引数で transfer するとバッファが無効化されるため、
-  // 呼び出し元が保持する image はそのまま残るように複製してから渡す（ゼロコピーは複製後の分だけ）
-  const transferable = new ImageData(new Uint8ClampedArray(image.data), image.width, image.height)
-
-  return new Promise<OcrResult>((resolve, reject) => {
-    pending.set(id, (response) => {
-      if (response.type === 'result') {
-        markOcrEngineCached()
-        resolve(response.result)
-      } else if (response.type === 'error') {
-        reject(new Error(response.message))
-      }
-    })
-    const message: RecognizeRequest = { type: 'recognize', id, imageData: transferable, options }
-    worker.postMessage(message, [transferable.data.buffer])
-  })
-}
-
-// 既存の呼び出し互換のための一括版（撮影 + 認識をまとめて行う）
-export async function runOcr(
-  source: HTMLVideoElement,
-  roi: RoiRect,
-  options: OcrOptions,
-  onProgress?: (progress: OcrProgress) => void,
-): Promise<OcrResult> {
-  const image = captureRoi(source, roi)
-  return recognizeCaptured(image, options, onProgress)
-}
-
-export function disposeOcr(): void {
-  if (ocrWorker) {
-    const terminateMessage: TerminateRequest = { type: 'terminate' }
-    try {
-      ocrWorker.postMessage(terminateMessage)
-    } catch {
-      // 送信に失敗しても後続の terminate() で確実に破棄する
-    }
-    ocrWorker.terminate()
-    ocrWorker = null
-  }
-  // 待機中の呼び出しは破棄されたものとして解決しておく（呼び出し元が永久に待たないように）
-  for (const [id, resolve] of pending) {
-    resolve({ type: 'error', id, message: 'OCR was disposed' })
-  }
-  pending.clear()
-  progressListeners.clear()
+  return recognizeWithMlKit(image)
 }

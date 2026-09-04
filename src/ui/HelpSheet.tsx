@@ -110,6 +110,12 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             動かした位置・大きさはモードごとに個別に記憶されます。「バーコードモードで動かした枠が、文字モードの枠にも影響する」
             ということはありません。
           </p>
+          <p>
+            モード切り替えのすぐ下には<strong className="text-slate-100">「画質」「整形」</strong>
+            が常に並んでいます。この2つはどちらのモードでも共通の設定（一度決めたらしばらく変えないもの）なので、
+            モードを切り替えても位置も内容も変わりません。トーチ・一時停止・シャッターなど「読み取りのたびに押す」
+            操作は、これまで通り画面下のボタン列にあります。
+          </p>
         </Section>
 
         <Section title="バーコードモード">
@@ -152,7 +158,12 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
           <ul className="list-disc space-y-1.5 pl-5">
             <li>
               <ButtonRef tone="primary">枠内のみ</ButtonRef>
-              （既定でON）: 枠の中にあるバーコードだけを読み取ります。OFFにすると、カメラに写っている画面全体からバーコードを読み取ります。設定は端末に記憶されます。
+              （既定でON）: 枠の中にあるバーコードだけを読み取ります。OFFにすると、カメラに写っている画面全体からバーコードを読み取ります。
+              <strong className="text-slate-100">
+                OFFにすると水色の枠自体が消えます
+              </strong>
+              （画面全体が対象なのに枠の外だけ暗いままだと紛らわしいため、枠・枠外を暗くする表示ごと消します）。
+              「読み取り済み」の通知は、この状態ではカメラ映像の中央に表示されます。設定は端末に記憶されます。
             </li>
             <li>
               <ButtonRef icon={<SoundOnIcon className="h-4 w-4" />}>音</ButtonRef>
@@ -192,10 +203,24 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
               </strong>
               （押していないとき＝止まっているとき、なので一時停止する意味がないためです）。
             </li>
+          </ul>
+          <p className="text-sm text-slate-400">
+            「画質」はバーコードモード専用ではなく共通設定（画面上部）に移りました。次のセクションを参照してください。
+          </p>
+        </Section>
+
+        <Section title="共通設定（画質・整形）">
+          <p>
+            モード切り替えのすぐ下にある帯には、<strong className="text-slate-100">バーコード・文字どちらのモードでも使う設定</strong>
+            だけをまとめてあります。ここに置いてあるのは「一度決めたらしばらく変えない」種類の設定で、モードを切り替えても
+            位置も内容も変わりません。
+          </p>
+          <ul className="list-disc space-y-1.5 pl-5">
             <li>
               <strong className="text-slate-100">画質</strong>
               （既定は「最大」）: カメラが取得する映像の解像度を「最大 / 標準 / 軽量」の3段階で切り替えられます。数値が大きいほど細かいところまで写るため、バーコードの細いバーも読み取りやすくなります。
-              端末の負荷が気になるときも、まずは
+              <strong className="text-slate-100">文字（OCR）モードの精度にも直接効きます。</strong>
+              バーコードモードで端末の負荷が気になるときは、まずは
               <ButtonRef tone="primary">枠内のみ</ButtonRef>
               で枠を狙った1本ぶんまで小さくすることを先に試してください。それでも重いと感じる場合の追加の手段として画質を下げてください。
               <strong className="text-amber-300">
@@ -203,15 +228,22 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
               </strong>
               設定は端末に記憶されます。
             </li>
+            <li>
+              <ButtonRef>整形</ButtonRef>
+              : バーコード・文字（OCR）どちらの読み取り値からも不要な部分を取り除く設定です。次のセクションで詳しく説明します。
+            </li>
           </ul>
         </Section>
 
-        <Section title="バーコード値の整形（トリミング）">
+        <Section title="整形（トリミング）">
           <p>
-            バーコードモードの
+            画面上部の共通設定バーにある
             <ButtonRef>整形</ButtonRef>
-            を押すと、読み取ったバーコードの値から不要な部分を取り除く設定を開けます。
-            <strong className="text-slate-100">バーコードだけに適用され、文字（OCR）モードの結果には一切影響しません。</strong>
+            を押すと、読み取った値から不要な部分を取り除く設定を開けます。
+            <strong className="text-slate-100">
+              バーコード・文字（OCR）どちらの読み取りにも同じ1つのルールが使われます。
+            </strong>
+            設定を2箇所に分けると現場が混乱するため、あえて1つに集約してあります。
           </p>
           <p>設定できるルールは次の5種類で、この順番でまとめて適用されます。</p>
           <ul className="list-disc space-y-1.5 pl-5">
@@ -224,18 +256,31 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
           <p>
             パネルを開いた状態ではバーコードの自動読み取りは止まり、上部の
             <strong className="text-slate-100">プレビュー欄</strong>
-            で今のルールを適用した結果をその場で確認できます（一覧にある直近のバーコード値が初期値として入ります）。
+            で今のルールを適用した結果をその場で確認できます（一覧にある直近の読み取り値が、バーコード・OCRどちらの結果でも初期値として入ります）。
           </p>
           <p>
-            整形された値だけが一覧・全部コピー・各行のコピーに使われます。
+            <strong className="text-slate-100">
+              整形は「読み取りを受け付けた瞬間」のルールで確定し、一覧に積まれます。
+            </strong>
+            あとから整形の設定を変えても、既に一覧にある行には遡って効きません（バーコード・OCRとも共通の考え方です）。
             元の読み取り値も保持しており、整形によって値が変わったときだけ、その行の下に小さく
             <strong className="text-slate-100">「元の読み取り: 〜」</strong>
             として表示します。
             <strong className="text-amber-300">ルールを適用した結果が空文字になってしまう場合は、読み取りを無駄にしないよう元の値をそのまま使います。</strong>
           </p>
           <p>
-            <strong className="text-slate-100">「読み取り済み」の判定（重複チェック）も、整形した後の値で行います。</strong>
-            整形前の値が違っても、整形後の値が一致すれば同じバーコードとして扱われます。
+            <strong className="text-slate-100">「読み取り済み」の判定（重複チェック）</strong>
+            はバーコードだけの機能で、整形した後の値で行います。整形前の値が違っても、整形後の値が一致すれば同じバーコードとして扱われます
+            （OCRの結果は「読み取り済み」の対象にはなりません）。
+          </p>
+          <p>
+            <strong className="text-slate-100">文字（OCR）モードでは、次の順番で値が決まります。</strong>
+            1. 「紛らわしい文字の手直し」でタップして直した後の生テキスト → 2. 整形 → 3. 抽出フィルタ（数字のみ等）。
+            整形を先にするのは、フィルタで先に空白や記号を落としてしまうと、整形が探している区切り文字自体が消えて
+            見つからなくなるためです。抽出フィルタだけは切り替えるたびに一覧の表示へ即座に反映されますが、
+            整形はバーコードと同じく読み取った瞬間に確定します。エンジンが実際に返した生テキストは、手直し後も
+            <strong className="text-slate-100">常に別行でそのまま表示され続けます</strong>
+            （このアプリは生の認識結果を隠しません）。
           </p>
           <div className="flex gap-2.5 rounded-lg border border-slate-600 bg-slate-800/60 p-3.5">
             <p className="leading-relaxed">
@@ -293,66 +338,46 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             <ButtonRef icon={<ScanIcon className="h-4 w-4" />} tone="primary">
               枠内をOCR
             </ButtonRef>
-            を押します。初回だけ文字認識エンジン（約9MB）のダウンロードが走りますが、一度ダウンロードすればそれ以降は電波が無い場所でもそのまま使えます。
+            を押します。文字認識には Google ML Kit（端末に組み込み済み）を使うため、
+            ダウンロードは不要で、電波が無い場所でもそのまま使えます。
           </p>
           <p>
-            結果カードには、読み取り結果のほかにこのアプリで唯一の設定がまとまっています。
+            <strong className="text-amber-300">文字モードはAndroidアプリ（APK）版でのみ使えます。</strong>
+            ブラウザ（このページをそのまま開いている場合）では ML Kit が使えないため、
+            シャッターボタンが押せない状態になり、その旨の案内が表示されます。
+          </p>
+          <p>
+            結果カードには、読み取り結果のほかにこのアプリで唯一の設定（抽出フィルタ・
+            バーコード自動除外）がまとまっています。
             <strong className="text-slate-100">実物の現品票を読ませてみながら調整してください。</strong>
           </p>
-          <ul className="list-disc space-y-1.5 pl-5">
-            <li>
-              <strong className="text-slate-100">エンジン</strong>
-              （既定は<ButtonRef>Tesseract</ButtonRef>）: 文字認識のしくみを切り替えます。
-              <ButtonRef>ML Kit</ButtonRef>
-              は
-              <strong className="text-amber-300">Androidアプリ（APK）版でのみ選べます。</strong>
-              ブラウザ（このページをそのまま開いている場合）ではボタンが押せない状態になり、その旨の説明が添えられます。
-              どちらが実際のラベルでよく読めるかはまだ分かっていないため、両方試して比べられるようにしてあります。
-            </li>
-            <li>
-              <strong className="text-slate-100">丁寧に読む</strong>
-              （既定はOFF）: ONにすると、同じ画像をもう一度別のPSM（読み取りモード）で読み直し、2回の結果を突き合わせます。
-              <strong className="text-amber-300">認識にかかる時間が約2倍になります</strong>
-              が、2回の結果が食い違った文字を次に説明する「怪しい文字」として見つけやすくなります。
-              <ButtonRef>ML Kit</ButtonRef>
-              を選んでいるときは、PSMという設定自体が無いため2パス目に意味が無く、このトグルは表示されません。
-            </li>
-          </ul>
         </Section>
 
-        <Section title="怪しい文字の強調と手直し">
+        <Section title="紛らわしい文字の手直し">
           <p>
             結果カードの<strong className="text-slate-100">「生の読み取り結果」</strong>
-            では、読み間違えている可能性がある文字だけ
-            <span className="mx-1 rounded bg-amber-500/30 px-1.5 py-0.5 font-mono text-amber-200">黄色</span>
-            で表示されます。判定の根拠は次の2つで、どちらか一方でも怪しいと言っていれば黄色になります。
-          </p>
-          <ul className="list-disc space-y-1.5 pl-5">
-            <li>エンジンがその文字の認識に自信を持てていない（文字ごとの信頼度が低い）</li>
-            <li>
-              <ButtonRef>丁寧に読む</ButtonRef>
-              がONのとき、2回の読み取り結果がその文字で食い違った
-            </li>
-          </ul>
-          <p>
-            黄色い文字は
-            <strong className="text-slate-100">タップすると、見分けにくい別の字形（例:</strong>
+            では、字形が紛らわしく読み間違えやすい文字（
             <span className="mx-1 font-mono text-slate-100">1↔I</span>
             <span className="mx-1 font-mono text-slate-100">0↔O</span>
             <span className="mx-1 font-mono text-slate-100">5↔S</span>
             <span className="mx-1 font-mono text-slate-100">8↔B</span>
-            など）
-            <strong className="text-slate-100">に切り替えられます。</strong>
-            もう一度タップすれば元に戻ります。直した内容は、結果一覧に積まれたその行の値・コピーする値にそのまま反映されます。
+            など）に
+            <strong className="text-slate-100">下線</strong>
+            が引かれ、タップすると見分けにくい別の字形に切り替えられます。もう一度タップすれば
+            元に戻ります。直した内容は、結果一覧に積まれたその行の値・コピーする値にそのまま
+            反映されます。
+          </p>
+          <p>
+            <strong className="text-slate-100">
+              どの文字が実際に読み間違いかは、このアプリには判定できません。
+            </strong>
+            そのため下線は「怪しいと判定された文字だけ」ではなく、
+            <strong className="text-slate-100">対応表に載っている文字すべて</strong>
+            に付いています。どこが間違っているかは、実物のラベルを見ているあなたが判断してください。
           </p>
           <p>
             <strong className="text-slate-100">エンジンが実際に返した文字そのもの（生テキスト）は、直した後も変わらず表示され続けます。</strong>
             何を直したのかが後から分からなくならないよう、このアプリでは生の認識結果を隠すことは一切ありません。
-          </p>
-          <p>
-            判定の材料（信頼度・2回目の読み取り）が無い場合は、
-            <strong className="text-slate-100">何も強調せず普通の文字として表示します。</strong>
-            「情報が無いこと」を「全部怪しいこと」として見せると、かえって信用できる情報を減らしてしまうためです。
           </p>
         </Section>
 
@@ -363,7 +388,7 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             です。結果がおかしいときは、この画像を見れば「枠のずれ」や「ピントのボケ」が原因かどうかを判断できます。
           </p>
           <p>
-            PSM（読み取りモード）やバーコード除外の設定を変えたときは、
+            バーコード除外の設定を変えたときは、
             <ButtonRef>同じ画像で再認識</ButtonRef>
             を押せば、もう一度狙い直さずに、今の画像のまま読み直せます。抽出フィルタの切り替えだけは読み取り済みの結果を絞り込むだけなので、押さなくても表示がすぐに変わります。
           </p>
@@ -383,7 +408,7 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             <ButtonRef>設定を比較</ButtonRef>
             （読み取り結果が出ているときだけ表示されます）を押すと、
             <strong className="text-slate-100">撮り直しはせず、いま撮った同じ1枚の画像</strong>
-            に対して、PSMや前処理（罫線除去・バーコードの縞マスク・コントラスト正規化）の組み合わせをいくつも変えながらまとめて読み取り直し、結果を並べて見比べられます。
+            に対して、前処理（罫線除去・バーコードの縞マスク・コントラスト正規化、または前処理なしの素の画像）の組み合わせをいくつも変えながらまとめて読み取り直し、結果を並べて見比べられます。
           </p>
           <p>
             <strong className="text-amber-300">
@@ -391,7 +416,7 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             </strong>
             並んだ結果を見比べて、一番よく読めている設定の
             <strong className="text-slate-100">「この設定を使う」</strong>
-            を押してください。押した設定（PSM・前処理の組み合わせ）はこのアプリに記憶され、以降のシャッターすべてに使われます。
+            を押してください。押した設定（前処理の組み合わせ）はこのアプリに記憶され、以降のシャッターすべてに使われます。
           </p>
         </Section>
 
@@ -477,7 +502,7 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
 
         <Section title="ライセンス情報">
           <p>
-            このアプリは、OCRエンジン（tesseract.js）・バーコード読み取り（zxing-wasm）・React などの
+            このアプリは、OCRエンジン（Google ML Kit）・バーコード読み取り（zxing-wasm）・React などの
             オープンソースソフトウェアを利用して作られています。それぞれのライセンス本文は
             <strong className="text-slate-100">アプリの中に同梱</strong>してあり、通信できない場所でもそのまま読めます。
           </p>

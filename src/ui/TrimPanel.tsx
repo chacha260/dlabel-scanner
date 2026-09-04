@@ -1,4 +1,6 @@
-// バーコード値の「整形（トリミング）」ルールを編集する全画面パネル。
+// 読み取り値の「整形（トリミング）」ルールを編集する全画面パネル。
+// バーコード・OCR共通のルール（TrimRules）を1つだけ編集する（設定を2箇所に
+// 増やして現場を混乱させないため。詳しくは scan/barcode/trim.ts 冒頭のコメントを参照）。
 // HelpSheet.tsx と同じ構造（全画面オーバーレイ・上部に閉じるボタン・下端にも
 // 閉じるボタン）に揃えてある。開いている間はカメラがどこを向いているか
 // 分からなくなる（＝バーコード読み取りを止めるべき）点も HelpSheet と同じなので、
@@ -30,7 +32,11 @@ import { Switch } from './components/Controls'
 type TrimPanelProps = {
   rules: TrimRules
   onChange: (next: TrimRules) => void
-  /** 一覧にある直近のバーコード値（元の読み取り値）。プレビュー欄の初期値に使う */
+  /**
+   * 一覧にある直近の結果（バーコード・OCRどちらでもよい）の元の読み取り値。
+   * プレビュー欄の初期値に使う。ルールは共有なので、直近に読んだのがどちらの
+   * モードの結果でも構わない。
+   */
   previewSeed: string | null
   onClose: () => void
 }
@@ -172,18 +178,18 @@ export default function TrimPanel({ rules, onChange, previewSeed, onClose }: Tri
           <Switch
             checked={rules.enabled}
             onChange={(checked) => pushRules({ enabled: checked })}
-            label="バーコード値の整形を有効にする"
-            hint="OFFの間は、下のルールを設定していても読み取った値はそのまま一覧に追加されます。"
+            label="読み取り値の整形を有効にする"
+            hint="OFFの間は、下のルールを設定していてもバーコード・OCRどちらの読み取り値もそのまま一覧に追加されます。"
           />
         </section>
 
-        {/* プレビュー: 一覧の直近のバーコード値（無ければ空欄）を初期値にし、
-            ルールを変えるたびに・プレビュー欄自体を書き換えるたびに即座に結果を再計算する。
-            削られる部分は薄く・打ち消し線で、残る部分は目立たせて表示する。 */}
+        {/* プレビュー: 一覧の直近の結果（バーコード・OCRどちらでも可、無ければ空欄）を
+            初期値にし、ルールを変えるたびに・プレビュー欄自体を書き換えるたびに即座に
+            結果を再計算する。削られる部分は薄く・打ち消し線で、残る部分は目立たせて表示する。 */}
         <section className="border-b border-slate-800 bg-slate-900/60 px-5 py-6">
           <p className="text-sm font-semibold text-cyan-300">プレビュー</p>
           <p className="mt-0.5 text-xs leading-snug text-slate-500">
-            一覧にある直近のバーコード値を初期値として、今のルールを適用した結果をその場で確認できます。
+            一覧にある直近の読み取り値を初期値として、今のルールを適用した結果をその場で確認できます。
             制御文字（GSなど）は<span className="font-mono">\x1D</span>のような表記で入力してください。
           </p>
           <input

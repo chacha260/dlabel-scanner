@@ -11,10 +11,10 @@ Service Worker のキャッシュにより電波の無い場所でも動作し�
 通信できません（詳細は [`docs/apk.md`](apk.md) の「7. `INTERNET` 権限に
 ついて」を参照）。
 
-一方で、このアプリは React・tesseract.js（OCRエンジン）・zxing-wasm
-（バーコード読み取りエンジン）など、複数のOSSライブラリを利用しており、
-それぞれのライセンス（MIT・Apache-2.0 など）は著作権表示・ライセンス本文の
-同梱を求めています。
+一方で、このアプリは React・zxing-wasm（バーコード読み取りエンジン）・
+Google ML Kit（OCRエンジン）など、複数のOSSライブラリ／ライブラリ由来の
+配布物を利用しており、それぞれのライセンス（MIT・Apache-2.0 など）は
+著作権表示・ライセンス本文の同梱を求めています。
 
 「ライセンス情報は各ライブラリの GitHub ページを見てください」という
 外部リンク方式は、通信できない前提のこのアプリでは実質的に「ライセンス情報を
@@ -46,8 +46,9 @@ pnpm run licenses
    `package.json` の `license` フィールドだけを記録し、本文欄には
    「ライセンス本文ファイルが同梱されていません」という日本語の注記を
    入れます。
-3. `public/vendor/` 配下に手動でベンダリングされているファイル向けの
-   手書きエントリ（3章参照）をマージします。
+3. npm の依存解決には出てこないが実際のビルド成果物に含まれる配布物
+   （Android のネイティブ依存として組み込まれる ML Kit など）向けの
+   手書きエントリ（4章参照）をマージします。
 4. 名前順にソートし、TypeScript モジュールとして書き出します。
 
 **再生成が必要なタイミング**: `dependencies`（`package.json`）を
@@ -97,28 +98,34 @@ pnpm run licenses:check
 開発時の作業であり、「ビルドするたび」に発生する作業ではない、という
 役割分担にしています。
 
-## 4. `public/vendor/` の手動ベンダリング物を手書きエントリで補っている理由
+## 4. npmの依存解決に出てこない配布物を手書きエントリで補っている理由
 
-`public/vendor/tesseract/` 以下には、npm の依存解決を経由せず、
-開発者が事前にダウンロードして手動で配置しているファイルがあります。
+以前はここに `public/vendor/tesseract/` 以下（npm の依存解決を経由せず、
+開発者が事前にダウンロードして手動配置していた tesseract.js の
+Web Worker 本体・tesseract.js-core の WebAssembly 本体・Tesseract OCR の
+英語学習済みモデル）の説明があった。tesseract.js を完全に削除し
+`public/vendor/` 自体が無くなったため、この節の内容も現状に合わせて
+書き換えている。
 
-- `worker.min.js` — tesseract.js の配布物（Web Worker 本体）
-- `tesseract-core-lstm.wasm` / `tesseract-core-lstm.wasm.js` /
-  `tesseract-core-simd-lstm.wasm` / `tesseract-core-simd-lstm.wasm.js`
-  — tesseract.js-core の配布物（WebAssembly 版 OCR エンジン本体）
-- `tessdata/eng.traineddata` — Tesseract OCR の英語学習済みモデル
-  （tessdata_best リポジトリ由来）
+現在、手書きで補っているのは次の2件です。
 
-また、npm パッケージ `zxing-wasm` が内部に同梱している
-`zxing_reader.wasm` は、zxing-wasm 自体のコードではなく、C++製
-バーコード読み取りライブラリ zxing-cpp を WebAssembly にビルドしたもの
-です。zxing-wasm 本体のライセンス（MIT）とは別のライセンス
-（zxing-cpp は Apache-2.0）が適用されるため、区別して掲載する必要があります。
+- **Google ML Kit Text Recognition v2** — npm パッケージではなく、
+  Android のネイティブ依存（Gradle の `com.google.mlkit:text-recognition`）
+  として APK に静的リンクされます。`pnpm ls` の依存ツリーにはそもそも
+  現れない（JavaScript側のラッパーである `@capacitor-mlkit/text-recognition`
+  自体は npm パッケージとして自動収集の対象になっています）にもかかわらず、
+  実際のビルド成果物（APK）には確実に含まれるOCRエンジン本体なので、
+  漏らさず手書きで補っています。
+- **zxing-cpp（`zxing_reader.wasm`）** — npm パッケージ `zxing-wasm` が
+  内部に同梱している `zxing_reader.wasm` は、zxing-wasm 自体のコードでは
+  なく、C++製バーコード読み取りライブラリ zxing-cpp を WebAssembly に
+  ビルドしたものです。zxing-wasm 本体のライセンス（MIT）とは別の
+  ライセンス（zxing-cpp は Apache-2.0）が適用されるため、区別して
+  掲載する必要があります。
 
 これらはいずれも `pnpm ls` の依存ツリーには出てこない（=
 `scripts/generate-licenses.mjs` の自動収集では検出できない）にもかかわらず、
-実際のビルド成果物には確実に含まれ、しかもサイズの大きいバイナリとして
-ユーザーが実体を意識する対象でもあります。そこで、スクリプト内に
+実際のビルド成果物には確実に含まれます。そこで、スクリプト内に
 `MANUAL_VENDOR_ENTRIES` という定数配列として出自（どのOSSプロジェクトの
 配布物か・ライセンス種別）を手書きし、npmパッケージから自動収集した
 エントリとマージして一覧に含めています。

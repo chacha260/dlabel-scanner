@@ -7,11 +7,11 @@ android {
         applicationId "jp.local.dlabelscanner"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        // リリースタグ v1.1.0 に対応。サイドロードで入れ替える運用のため、
+        // リリースタグ v1.2.0 に対応。サイドロードで入れ替える運用のため、
         // 端末の「設定 → アプリ」でどちらのビルドが入っているか判別できるよう、
         // リリースのたびに必ず versionCode と versionName の両方を上げること。
-        versionCode 2
-        versionName "1.1.0"
+        versionCode 3
+        versionName "1.2.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
