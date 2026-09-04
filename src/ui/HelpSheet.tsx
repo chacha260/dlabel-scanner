@@ -27,6 +27,13 @@ import {
 
 type HelpSheetProps = {
   onClose: () => void
+  /**
+   * ライセンス情報パネルを開く。パネル本体（LicenseSheet）はこのコンポーネントの
+   * 子としてではなく SimpleScanScreen.tsx 側で描画する。使い方パネルの上に
+   * 重ねて出すため、開閉状態も z-index の前後関係も1箇所（画面側）で
+   * まとめて面倒を見たほうが、どちらが手前かを追いやすいため。
+   */
+  onOpenLicenses: () => void
 }
 
 type PillTone = 'default' | 'primary' | 'danger' | 'amber'
@@ -52,6 +59,16 @@ function ButtonRef({ icon, tone = 'default', children }: { icon?: ReactNode; ton
   )
 }
 
+// ボタン右端に添える「>」。専用アイコンを Icons.tsx に増やすほどの用途ではないため、
+// このファイル内だけの表示用グリフとして持つ（意味は持たないので aria-hidden）。
+function ChevronRightGlyph() {
+  return (
+    <span aria-hidden="true" className="text-slate-400">
+      ›
+    </span>
+  )
+}
+
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="border-b border-slate-800 px-5 py-7">
@@ -61,7 +78,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
-export default function HelpSheet({ onClose }: HelpSheetProps) {
+export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
   return (
     <div className="fixed inset-0 z-[70] flex flex-col bg-slate-950 text-slate-100">
       {/* 上部バー: タイトルと閉じるボタン（×）。常に見える位置に固定する */}
@@ -99,6 +116,9 @@ export default function HelpSheet({ onClose }: HelpSheetProps) {
           <p>
             <ButtonRef tone="primary">バーコード</ButtonRef>
             を選んでいる間は、カメラをバーコードに向けるだけで自動的に・繰り返し読み取って一覧に追加していきます。特別な操作はいりません。
+            （下の<strong className="text-slate-100">「読み取り」</strong>を
+            <ButtonRef>長押し中だけ</ButtonRef>
+            に切り替えると、ボタンを押している間だけ読む動きに変えられます。次の項を参照してください。）
           </p>
           <p>
             水色の枠（「読み取り範囲」）は、バーコードを受け付ける範囲を示しています。
@@ -146,7 +166,31 @@ export default function HelpSheet({ onClose }: HelpSheetProps) {
               </ButtonRef>
               を押すと、バーコードの読み取りだけを止めます。カメラ映像はそのまま映り続けるので、もう一度押して
               <ButtonRef icon={<PlayIcon className="h-4 w-4" />}>再開</ButtonRef>
-              すればすぐに読み取りを再開します。
+              すればすぐに読み取りを再開します。このボタンは
+              <strong className="text-slate-100">「読み取り」が「常に読む」のとき</strong>だけ表示されます。
+            </li>
+            <li>
+              <strong className="text-slate-100">読み取り</strong>
+              （既定は「常に読む」）: バーコードを<strong className="text-slate-100">いつ読むか</strong>を切り替えます。設定は端末に記憶されます。
+              <ul className="mt-1.5 list-[circle] space-y-1.5 pl-5">
+                <li>
+                  <ButtonRef tone="primary">常に読む</ButtonRef>
+                  : これまで通りの動きです。カメラを向けている間ずっと読み取り続けます。棚卸しのように次々に読んでいく作業に向いています。
+                </li>
+                <li>
+                  <ButtonRef tone="primary">長押し中だけ</ButtonRef>
+                  :{' '}
+                  <ButtonRef icon={<ScanIcon className="h-4 w-4" />}>押して読み取り</ButtonRef>
+                  を<strong className="text-slate-100">指で押さえている間だけ</strong>読み取ります。指を離した瞬間に止まります。
+                  現品票が密集していて、狙っていない隣のラベルまで勝手に拾ってしまう場所で使ってください。
+                  ハンディターミナルのトリガーと同じ感覚で使えます。押している間はカメラ映像の下に
+                  <strong className="text-cyan-300">「読み取り中」</strong>と表示されます。
+                </li>
+              </ul>
+              <strong className="text-amber-300">
+                「長押し中だけ」を選んでいる間は、一時停止ボタンは表示されません
+              </strong>
+              （押していないとき＝止まっているとき、なので一時停止する意味がないためです）。
             </li>
             <li>
               <strong className="text-slate-100">画質</strong>
@@ -325,6 +369,13 @@ export default function HelpSheet({ onClose }: HelpSheetProps) {
             <ButtonRef tone="danger">クリア</ButtonRef>
             で一覧をすべて消せます。
           </p>
+          <p>
+            QRコードなど、非常に長い値（数百〜数千文字）を読み取ったときは、一覧では先頭の300文字だけを表示し、
+            <ButtonRef>全〇〇文字を表示</ButtonRef>
+            を押すとその行だけ全文を開けます。
+            <strong className="text-slate-100">短く表示しているのは画面表示だけで、コピーされるのは常に全文です</strong>
+            （長い値をそのまま画面いっぱいに描画すると端末が重くなるための措置です）。
+          </p>
           <div className="flex gap-2.5 rounded-lg border border-amber-500/50 bg-amber-950/40 p-3.5">
             <WarningIcon className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
             <p className="font-semibold text-amber-200">
@@ -337,6 +388,22 @@ export default function HelpSheet({ onClose }: HelpSheetProps) {
           <p>
             Chromeのメニューから「ホーム画面に追加」を選ぶと、アプリのように起動できるようになり、電波が無い場所でもそのまま使えます。
           </p>
+        </Section>
+
+        <Section title="ライセンス情報">
+          <p>
+            このアプリは、OCRエンジン（tesseract.js）・バーコード読み取り（zxing-wasm）・React などの
+            オープンソースソフトウェアを利用して作られています。それぞれのライセンス本文は
+            <strong className="text-slate-100">アプリの中に同梱</strong>してあり、通信できない場所でもそのまま読めます。
+          </p>
+          <button
+            type="button"
+            onClick={onOpenLicenses}
+            className="flex min-h-14 w-full items-center justify-center gap-2 rounded-xl bg-slate-800 text-base font-bold text-slate-100 active:bg-slate-700"
+          >
+            ライセンス情報を見る
+            <ChevronRightGlyph />
+          </button>
         </Section>
 
         {/* スクロールを戻さなくても閉じられるよう、末尾にも閉じるボタンを置く */}

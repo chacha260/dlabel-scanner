@@ -65,6 +65,26 @@ prepareZXingModule({
 type DecodeRequest = { type: 'decode'; id: number; bitmap: ImageBitmap }
 type DecodeResponse = { type: 'result'; id: number; hits: BarcodeHit[]; error?: string }
 
+// この worker が受け付ける入力の最終防衛ライン（画素数の上限）。
+// 通常はここに届く前に呼び出し側（useBarcodeScanner.ts）が
+// CROP_PIXEL_BUDGET_PX（約2.5MP、「枠内のみ」ON時）や ZXING_LONG_EDGE_PX
+// （長辺1280px、フル フレーム時）で十分に絞り込んでいるため、この上限に
+// 引っかかること自体は想定していない。ただし唯一の例外として、シャッター
+// 押下時の detectBoxes()（useBarcodeScanner.ts）は静止フレームを
+// ダウンスケールせずそのまま渡す設計であり、カメラ画質プリセット
+// （camera/quality.ts）が既定の 'max'（3840x2160=約830万px）のときや、
+// 実機のセンサーがそれ以上（12MP級等）を返してきた場合はここまで
+// 大きな画素数がそのまま届き得る。
+// getImageData() は画素数に比例した ArrayBuffer を確保し、readBarcodes()は
+// それを wasm ヒープへコピーするため、際限なく大きい入力を許すと
+// emscripten の abort()（RangeError等）や、それによる worker の異常終了を
+// 招きうる（barcode/index.ts の createZxingReaderCore が「worker が黙って
+// 応答しなくなる」経路を塞いでいるとはいえ、そもそも起こさないに越したことはない）。
+// 12MP（画質'max'の830万pxに、実機の12MPセンサー分の余裕を足した値）を
+// 緩めの上限とし、これを超える入力はデコードそのものをスキップして
+// 空配列を返す（呼び出し側は「見つからなかった」として扱える）。
+const MAX_INPUT_PIXELS = 12_000_000
+
 // 使い回す OffscreenCanvas（フレームごとに生成しない）
 let canvas: OffscreenCanvas | null = null
 let ctx: OffscreenCanvasRenderingContext2D | null = null
@@ -97,6 +117,22 @@ self.addEventListener('message', (event: MessageEvent<DecodeRequest>) => {
 async function handleDecode(request: DecodeRequest): Promise<void> {
   const { id, bitmap } = request
   try {
+    const pixelCount = bitmap.width * bitmap.height
+    if (pixelCount > MAX_INPUT_PIXELS) {
+      // 上のコメント（MAX_INPUT_PIXELS）参照。getImageData/readBarcodes に
+      // 進まず安全に諦める。bitmap.close() は finally で行われる。
+      console.warn(
+        `[barcode] zxing worker: input too large (${bitmap.width}x${bitmap.height} = ${pixelCount}px), skipping decode`,
+      )
+      post({
+        type: 'result',
+        id,
+        hits: [],
+        error: `入力画像が上限(${MAX_INPUT_PIXELS}px)を超えているためデコードをスキップしました (${bitmap.width}x${bitmap.height})`,
+      })
+      return
+    }
+
     const context = getContext(bitmap.width, bitmap.height)
     context.drawImage(bitmap, 0, 0)
     const imageData = context.getImageData(0, 0, bitmap.width, bitmap.height)
@@ -104,6 +140,13 @@ async function handleDecode(request: DecodeRequest): Promise<void> {
     const results = await readBarcodes(imageData, {
       formats: ZXING_FORMATS,
       tryHarder: false,
+      // 1フレームに大量のバーコードが写り込む病的な入力（例: 小さいQRを
+      // 多数印刷したシートをまるごと写す等）で、1回のデコードに際限なく
+      // 時間がかかることを防ぐための上限。現品票が縦に複数並ぶ実運用の
+      // ケース（selectNewHits のコメント参照）は数個程度で収まるため、
+      // 実用上困らない範囲で十分大きく、かつ zxing-wasm の既定値(255)より
+      // 小さく絞ってある。
+      maxNumberOfSymbols: 16,
     })
 
     const hits: BarcodeHit[] = results

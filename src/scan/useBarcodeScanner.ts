@@ -110,6 +110,20 @@ const FRAME_INTERVAL_MS = 100
 // zxing-wasm フォールバック経路だけに適用するダウンスケール上限（ネイティブ経路は無関係）
 const ZXING_LONG_EDGE_PX = 1280
 
+// busyRef が true に固定されたまま戻らなくなる不具合（barcode/index.ts の
+// 冒頭コメント参照）に対する最後の安全網。zxing 経路は barcode/index.ts 側で
+// 既に1リクエストあたり4秒のタイムアウトを内蔵しており、通常はそちらが
+// 先に detect() の Promise を必ず settle させる。この監視はそれでも
+// busyRef が戻らなかった場合（例: ネイティブ経路の BarcodeDetector.detect()
+// 自体がハングした、finally が実行される前に何らかの理由でイベントループが
+// 詰まった、等）のための保険なので、zxing 側の内部タイムアウトより
+// 十分大きい余裕を持たせておく（先に内部タイムアウトが機能して自己回復
+// できるなら、この監視が発火することはない）。
+const BUSY_WATCHDOG_MS = 8000
+// ウォッチドッグ発火や zxing の持続的デコード失敗などを利用者に知らせる
+// トースト表示の生存時間（showTransientError 参照）
+const ERROR_TOAST_DURATION_MS = 5000
+
 // requestVideoFrameCallback の型は DOM 標準にあるが、rVFC 非対応環境向けの
 // フォールバック判定用に、存在チェックだけ局所的に行う。
 type VideoWithFrameCallback = HTMLVideoElement & {
@@ -149,6 +163,32 @@ function playVibration(): void {
   } catch {
     // バイブレーション非対応環境では無視する
   }
+}
+
+// busyRef のウォッチドッグ発火・zxingワーカーの持続的デコード失敗・
+// worker自己回復の上限到達、といった「利用者に一度だけ軽く知らせたい」
+// 通知をまとめて扱うヘルパー。playBeep/playVibration と同様、ref を
+// 引数で受け取る形にしてあるのは、この関数自体をどこかの依存配列に
+// 入れる必要をなくすため。
+//
+// 同じ文言を setError にセットしっぱなしにすると、React は同一値への
+// setState を再レンダーなしに握りつぶすため、SimpleScanScreen 側の
+// 「scannerError が変わるたびにトーストを出す」仕組み（useEffect の
+// 依存配列に scannerError を積む形）が、2回目以降まったく同じ文言では
+// 発火しなくなってしまう。一定時間後に null へ戻すことで、
+// 同じ種類の異常が再発したときにも改めて通知できるようにしている。
+function showTransientError(
+  setError: (value: string | null) => void,
+  timerRef: { current: ReturnType<typeof setTimeout> | null },
+  message: string,
+  durationMs: number,
+): void {
+  setError(message)
+  if (timerRef.current !== null) clearTimeout(timerRef.current)
+  timerRef.current = setTimeout(() => {
+    setError(null)
+    timerRef.current = null
+  }, durationMs)
 }
 
 export function useBarcodeScanner({
@@ -216,6 +256,11 @@ export function useBarcodeScanner({
   const cropCanvasRef = useRef<OffscreenCanvas | null>(null)
   const cropCtxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null)
   const busyRef = useRef(false)
+  // busyRef.current を true にした時刻（performance.now() 基準）。
+  // BUSY_WATCHDOG_MS を参照。
+  const busyStartedAtRef = useRef(0)
+  // showTransientError が使う「一定時間後に error を null へ戻す」タイマー
+  const errorResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastFrameAtRef = useRef(0)
   // 「読み取り済み」通知（onDuplicate）を同じ値について連打しないための、
   // 通知だけに使う直近通知時刻。追加の可否（isDuplicate）には一切関与しない。
@@ -235,7 +280,29 @@ export function useBarcodeScanner({
     if (!readerActive) return
     let cancelled = false
 
-    createBarcodeReader()
+    createBarcodeReader({
+      // zxing-wasm 経路でデコードが持続的に失敗し続けている（＝1フレームの
+      // 偶発的な失敗ではない）と判定されたときの通知。この時点で
+      // barcode/index.ts 側は既にリーダーを作り直し済み（自己回復）なので、
+      // ここでは「起きたことを利用者に伝える」以上のことはしない。
+      onPersistentDecodeFailure: () => {
+        if (cancelled) return
+        showTransientError(
+          setError,
+          errorResetTimerRef,
+          'バーコードの読み取りが連続して失敗したため、読み取り処理を再起動しました',
+          ERROR_TOAST_DURATION_MS,
+        )
+      },
+      // barcode/index.ts が定める自己回復の上限回数（MAX_ZXING_WORKER_REGENERATIONS）
+      // に達し、これ以上の自動復旧を諦めたときの通知。以後 detect() は
+      // 常に空配列を返すだけになるため、これだけは自動で消さずに出し続ける
+      // （利用者の操作＝アプリの再読み込みが必要な、根本的に直らない状態のため）。
+      onWorkerExhausted: () => {
+        if (cancelled) return
+        setError('バーコード読み取り機能が繰り返し停止したため、自動復旧を諦めました。アプリを再読み込みしてください')
+      },
+    })
       .then(({ reader, backend: activeBackend }) => {
         if (cancelled) {
           reader.close()
@@ -265,6 +332,12 @@ export function useBarcodeScanner({
   useEffect(() => {
     if (!enabled) return
     stoppedRef.current = false
+    // 有効化された直後の1フレーム目は、FRAME_INTERVAL_MS の間引きに引っかからず
+    // 必ず解析させる。「長押し中だけ」モード（scanGating.ts の BarcodeTriggerMode）
+    // では enabled がボタンの押下ごとに false→true と切り替わるため、前回停止直前の
+    // 時刻がそのまま残っていると、短くタップしただけの操作が1フレームも解析されないまま
+    // 終わってしまう（＝押しても読めない）ことがある。
+    lastFrameAtRef.current = 0
 
     function scheduleNext(): void {
       if (stoppedRef.current) return
@@ -348,7 +421,27 @@ export function useBarcodeScanner({
     function tick(): void {
       const now = performance.now()
       if (now - lastFrameAtRef.current < FRAME_INTERVAL_MS) return
-      if (busyRef.current) return
+      if (busyRef.current) {
+        // ウォッチドッグ: 欠陥1（zxingリーダーのPromiseが永久に解決されない
+        // 経路）に対する最後の安全網。BUSY_WATCHDOG_MS の定義コメント参照。
+        // ここで強制的に戻さないと、busyRef が true のまま固定され、
+        // カメラ映像自体は流れ続けているのに以後すべてのフレームが
+        // このガードで永久にスキップされ続ける（＝現場からは
+        // 「アプリが落ちた/固まった」ように見える不具合そのもの）。
+        if (now - busyStartedAtRef.current > BUSY_WATCHDOG_MS) {
+          busyRef.current = false
+          showTransientError(
+            setError,
+            errorResetTimerRef,
+            'バーコード読み取り処理の応答が長時間なかったため、読み取りを再開しました',
+            ERROR_TOAST_DURATION_MS,
+          )
+          // ここでは return せず、このフレームでそのまま検出を再開する
+          // （次のtickまで待つより早く復旧できる）。以降は通常どおりの処理に続く。
+        } else {
+          return
+        }
+      }
 
       const reader = readerRef.current
       const video = videoRef.current
@@ -357,6 +450,7 @@ export function useBarcodeScanner({
 
       lastFrameAtRef.current = now
       busyRef.current = true
+      busyStartedAtRef.current = now
 
       // 「枠内のみ」の枠は表示座標で保持しているため、使う直前に必ずここで
       // mapCoverRectToVideo を通して映像座標へ変換する（フレームループ全体で
@@ -497,6 +591,10 @@ export function useBarcodeScanner({
         ctx.close().catch(() => {
           // クローズ失敗は無視してよい
         })
+      }
+      if (errorResetTimerRef.current !== null) {
+        clearTimeout(errorResetTimerRef.current)
+        errorResetTimerRef.current = null
       }
     }
   }, [])

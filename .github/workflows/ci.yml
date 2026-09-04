@@ -44,6 +44,13 @@ jobs:
       - name: テスト
         run: pnpm test
 
+      # 依存パッケージを追加・更新したのに同梱ライセンス一覧（src/licenses/generated.ts）の
+      # 再生成を忘れる、という事故を防ぐ。このアプリは完全オフライン動作が要件で、
+      # ライセンス表記もビルド成果物に同梱している以上、一覧が実際の依存から
+      # ずれている状態で配布してしまうのは避けたい（詳細は docs/licenses.md）。
+      - name: 同梱ライセンス一覧が最新か確認
+        run: pnpm run licenses:check
+
   build:
     name: ビルド
     needs: verify

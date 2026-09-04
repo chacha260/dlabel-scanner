@@ -10,7 +10,9 @@
     "build:apk": "PACKAGED=1 pnpm run build && pnpm exec cap sync android",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "licenses": "node scripts/generate-licenses.mjs",
+    "licenses:check": "node scripts/generate-licenses.mjs --check"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.1",

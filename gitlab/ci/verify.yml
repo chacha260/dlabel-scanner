@@ -7,3 +7,6 @@ verify:
     - pnpm exec tsc -b --force
     - pnpm lint
     - pnpm test
+    # 依存を追加・更新したのに同梱ライセンス一覧（src/licenses/generated.ts）の
+    # 再生成を忘れる事故を防ぐ（詳細は docs/licenses.md）。
+    - pnpm run licenses:check

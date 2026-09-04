@@ -2,7 +2,8 @@
 // 毎回操作し直すのが煩わしい表示・操作の設定だけは localStorage に残す。
 
 import type { CaptureQuality } from '../camera/quality'
-import type { ScanMode } from '../scan/scanGating'
+import type { BarcodeTriggerMode, ScanMode } from '../scan/scanGating'
+import { DEFAULT_BARCODE_TRIGGER_MODE } from '../scan/scanGating'
 import { DEFAULT_TRIM_RULES, type TrimRules } from '../scan/barcode/trim'
 
 const SCAN_MODE_STORAGE_KEY = 'dlabel.scanMode'
@@ -24,6 +25,32 @@ export function loadScanMode(): ScanMode {
 export function saveScanMode(mode: ScanMode): void {
   try {
     localStorage.setItem(SCAN_MODE_STORAGE_KEY, mode)
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
+
+const BARCODE_TRIGGER_MODE_STORAGE_KEY = 'dlabel.barcodeTriggerMode'
+
+/**
+ * バーコードの読み取り契機（常に読む / ボタンを押している間だけ読む）。
+ * 保存値が無い・壊れている場合は 'continuous'（常に読む）を既定とする。
+ * この既定は、この設定が存在しなかった頃からの唯一の挙動であり、
+ * 設定を一度も触っていない利用者の手元で挙動が変わらないようにするためのもの。
+ */
+export function loadBarcodeTriggerMode(): BarcodeTriggerMode {
+  try {
+    const raw = localStorage.getItem(BARCODE_TRIGGER_MODE_STORAGE_KEY)
+    return raw === 'hold' ? 'hold' : DEFAULT_BARCODE_TRIGGER_MODE
+  } catch {
+    // プライベートブラウジング等で読めなくても既定値（常に読む）で動作させる
+    return DEFAULT_BARCODE_TRIGGER_MODE
+  }
+}
+
+export function saveBarcodeTriggerMode(mode: BarcodeTriggerMode): void {
+  try {
+    localStorage.setItem(BARCODE_TRIGGER_MODE_STORAGE_KEY, mode)
   } catch {
     // 保存できなくても致命的ではないため無視する
   }

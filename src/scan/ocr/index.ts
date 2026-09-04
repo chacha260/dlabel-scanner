@@ -40,7 +40,9 @@ type TerminateRequest = { type: 'terminate' }
 type WarmupRequest = { type: 'warmup'; id: number }
 type ResultResponse = { type: 'result'; id: number; result: OcrResult }
 type ErrorResponse = { type: 'error'; id: number; message: string }
-type WarmupDoneResponse = { type: 'warmup-done'; id: number }
+// error はワーカー側 (ocr.worker.ts) の handleWarmup が学習データ読み込み等の失敗を
+// 伝えるための追加フィールド。'warmup-done' というメッセージ種別自体は変わらない。
+type WarmupDoneResponse = { type: 'warmup-done'; id: number; error?: string }
 type ProgressResponse = { type: 'progress'; id: number; status: string; progress: number }
 type Response = ResultResponse | ErrorResponse | WarmupDoneResponse | ProgressResponse
 
@@ -93,16 +95,30 @@ function ensureWorker(): Worker {
   return ocrWorker
 }
 
+// preloadOcr の結果。warmup が失敗した場合でも preloadOcr 自体は reject させない
+// （呼び出し側は SimpleScanScreen.tsx で `void preloadOcr(...)` と呼び捨てにしており、
+// reject させると unhandled rejection になってしまうため）。失敗した理由を知りたい
+// 呼び出し側だけが ok / error を見ればよく、見なくても既存の `void preloadOcr(...)`
+// という呼び方はそのまま動く。
+export type OcrPreloadResult = { ok: true } | { ok: false; error: string }
+
 // OCR モードに入った時点などで呼んでおくと、tesseract エンジンの初期化を
-// 先に済ませ、実際のシャッター時の待ち時間を減らせる
-export async function preloadOcr(onProgress?: (progress: OcrProgress) => void): Promise<void> {
+// 先に済ませ、実際のシャッター時の待ち時間を減らせる。
+// 学習データの読み込み失敗など、初期化に失敗した場合も本関数は reject しない
+// （上記 OcrPreloadResult のコメントを参照）。失敗しても以降の実際の認識要求
+// （recognizeCaptured）では改めて初期化が試みられ、そこでは通常どおり reject する。
+export async function preloadOcr(onProgress?: (progress: OcrProgress) => void): Promise<OcrPreloadResult> {
   const worker = ensureWorker()
   const id = nextId++
   if (onProgress) progressListeners.set(id, onProgress)
-  return new Promise<void>((resolve) => {
-    pending.set(id, () => {
+  return new Promise<OcrPreloadResult>((resolve) => {
+    pending.set(id, (response) => {
+      if (response.type === 'warmup-done' && response.error) {
+        resolve({ ok: false, error: response.error })
+        return
+      }
       markOcrEngineCached()
-      resolve()
+      resolve({ ok: true })
     })
     const message: WarmupRequest = { type: 'warmup', id }
     worker.postMessage(message)

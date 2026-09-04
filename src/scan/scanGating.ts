@@ -27,6 +27,8 @@ export type OverlayFlags = {
   helpOpen?: boolean
   /** バーコード値の整形（トリミング）ルール設定パネルを全画面表示している状態 */
   trimPanelOpen?: boolean
+  /** ライセンス情報パネルを全画面表示している状態 */
+  licenseOpen?: boolean
 }
 
 /** いずれかのオーバーレイが開いているか */
@@ -40,7 +42,8 @@ export function isAnyOverlayOpen(flags: OverlayFlags): boolean {
     (flags.clearConfirmOpen ?? false) ||
     (flags.draftBannerOpen ?? false) ||
     (flags.helpOpen ?? false) ||
-    (flags.trimPanelOpen ?? false)
+    (flags.trimPanelOpen ?? false) ||
+    (flags.licenseOpen ?? false)
   )
 }
 
@@ -52,6 +55,23 @@ export function isAnyOverlayOpen(flags: OverlayFlags): boolean {
  *              モード分割の核心。他の条件が全て揃っていてもこのモードでは無効にする。
  */
 export type ScanMode = 'barcode' | 'ocr'
+
+/**
+ * バーコードモードの「読み取り契機」。モード（barcode / ocr）とは直交する軸であり、
+ * 「今バーコードを読む画面かどうか」ではなく「バーコードモードの中で、いつ読むか」を決める。
+ *
+ * - 'continuous': カメラを向けている間ずっと読み続ける（従来からの唯一の挙動）。
+ *                 次々に読み取っていく棚卸しのような作業に向く。
+ * - 'hold'      : 読み取りボタンを押している間だけ読む。指を離した瞬間に止まる。
+ *                 現品票が密集していて、狙っていない隣のラベルまで勝手に拾ってしまう
+ *                 現場（ユーザー要望）向け。ハンディターミナルのトリガーと同じ操作感になる。
+ *
+ * 既定は 'continuous'。これまで唯一の挙動だったものを既定から外すと、
+ * 何も設定を触っていない利用者の手元で挙動が変わってしまうため。
+ */
+export type BarcodeTriggerMode = 'continuous' | 'hold'
+
+export const DEFAULT_BARCODE_TRIGGER_MODE: BarcodeTriggerMode = 'continuous'
 
 export type ScanGateInputs = {
   /** タブがスキャン画面で、かつカメラを起動すべき状態か（App.tsx 側のタブ切り替え） */
@@ -66,11 +86,42 @@ export type ScanGateInputs = {
   overlaysOpen: boolean
   /** 現在の読み取りモード。'ocr' のときは他の条件によらず常に無効にする */
   mode: ScanMode
+  /**
+   * バーコードの読み取り契機。省略時は 'continuous'（＝従来通りの常時読み取り）として扱う。
+   * 省略可能にしてあるのは、モード分割前から存在する画面（src/ui/legacy/ScanScreen.tsx）が
+   * この軸を持たないまま従来の挙動で動き続けられるようにするため。
+   */
+  triggerMode?: BarcodeTriggerMode
+  /**
+   * triggerMode が 'hold' のときに、読み取りボタンが「今まさに押されているか」。
+   * 省略時は false。'continuous' のときはこの値を一切見ない
+   * （＝ボタンを押していなくても読み続ける）。
+   */
+  holdActive?: boolean
+}
+
+/**
+ * 読み取り契機の条件だけを切り出した述語。
+ * - 'continuous': 常に満たされる（ボタンの押下状態を一切見ない）
+ * - 'hold'      : ボタンが押されている間だけ満たされる
+ *
+ * triggerMode を省略した呼び出し（レガシー画面など）は 'continuous' 扱いになるため、
+ * この関数を通しても従来の挙動は一切変わらない。
+ */
+export function isTriggerSatisfied(inputs: Pick<ScanGateInputs, 'triggerMode' | 'holdActive'>): boolean {
+  const triggerMode = inputs.triggerMode ?? DEFAULT_BARCODE_TRIGGER_MODE
+  if (triggerMode === 'continuous') return true
+  return inputs.holdActive ?? false
 }
 
 /**
  * バーコード検出を有効にすべきかどうかを判定する単一の述語。
  * ここに列挙した条件のいずれか1つでも満たさなければ検出を止める。
+ *
+ * 「長押し中のみ読む」モードの停止も、専用の分岐を別に設けるのではなく
+ * この述語の条件のひとつ（isTriggerSatisfied）として畳み込む。こうしておくと
+ * 「一時停止中」「ヘルプを開いている」といった既存の停止理由と同じ経路を通るため、
+ * 呼び出し側（useBarcodeScanner の enabled）に渡す値の作り方が1本のままで済む。
  */
 export function isBarcodeScanEnabled(inputs: ScanGateInputs): boolean {
   return (
@@ -79,6 +130,7 @@ export function isBarcodeScanEnabled(inputs: ScanGateInputs): boolean {
     inputs.cameraReady &&
     inputs.pageVisible &&
     !inputs.manualPaused &&
-    !inputs.overlaysOpen
+    !inputs.overlaysOpen &&
+    isTriggerSatisfied(inputs)
   )
 }

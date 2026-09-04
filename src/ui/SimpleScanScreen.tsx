@@ -14,7 +14,7 @@
 // 実際に何が必要かを確認するためのもの。ラベル定義エディタ・履歴・CSV書き出し・
 // 設定画面などの既存機能は src/ui/legacy 以下に退避してあり、削除はしていない。
 
-import type { CSSProperties } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RawScan } from '../parse/types'
 import type { NormalizedRect } from '../scan/barcode/types'
@@ -22,9 +22,11 @@ import { CAPTURE_QUALITY_OPTIONS, type CaptureQuality } from '../camera/quality'
 import { useCamera } from '../camera/useCamera'
 import { resolveZoomValue } from '../camera/zoom'
 import { useBarcodeScanner } from '../scan/useBarcodeScanner'
-import { isAnyOverlayOpen, isBarcodeScanEnabled, type ScanMode } from '../scan/scanGating'
+import { isAnyOverlayOpen, isBarcodeScanEnabled, type BarcodeTriggerMode, type ScanMode } from '../scan/scanGating'
 import { applyTrimRules, visualizeControlChars, type TrimRules } from '../scan/barcode/trim'
+import { truncateForDisplay } from '../scan/barcode/truncate'
 import {
+  loadBarcodeTriggerMode,
   loadCaptureQuality,
   loadHelpSeen,
   loadRestrictToRoi,
@@ -33,6 +35,7 @@ import {
   loadTrimRules,
   loadZoom,
   markHelpSeen,
+  saveBarcodeTriggerMode,
   saveCaptureQuality,
   saveRestrictToRoi,
   saveScanMode,
@@ -78,6 +81,12 @@ const HelpSheet = lazy(() => import('./HelpSheet'))
 // 押すまでは読み込まれない）。
 const TrimPanel = lazy(() => import('./TrimPanel'))
 
+// ライセンス情報パネルも別チャンクにする。同梱しているライセンス本文全文
+// （src/licenses/generated.ts、100KB超）を抱えているため、これをエントリー
+// チャンクに載せてしまうと、ライセンスを一度も開かない大多数の利用者にまで
+// 起動時のダウンロード・パースの負担がかかる。
+const LicenseSheet = lazy(() => import('./LicenseSheet'))
+
 // 「読み取り済み」通知の連打防止だけに使う短い時間窓（ミリ秒）。追加の可否
 // （＝一覧に同じ値が既にあるか）には一切関与しない。バーコード検出時の
 // ビープ/バイブもこの値を流用する。変更した場合は HelpSheet.tsx の
@@ -86,6 +95,17 @@ const NOTIFY_WINDOW_MS = 1500
 
 // 「読み取り済み」表示を出しっぱなしにする時間（ミリ秒）
 const DUPLICATE_HINT_VISIBLE_MS = 1200
+
+// 一覧の1行に、既定で表示する最大文字数。
+//
+// QR コードは最大 2,953 バイト（バイナリ）/ 4,296 文字（英数字）を持てる。
+// 数KBの連続した1トークンを <pre className="break-all"> に描画すると Chromium の
+// レイアウトは実測でかなり重くなり、一覧はスキャンのたびに全体が再レンダーされる
+// ため、「値の長い読み取りが1件増えるたびに画面が詰まる」原因になる。
+// 保持している値そのもの（コピー・全部コピーで使う値）は完全なまま一切削らず、
+// 見せ方だけをここで制限する（scan/barcode/truncate.ts のコメントも参照）。
+// 300文字あれば、現品票で実際に使う長さの値は切り詰めずにそのまま出せる。
+const RESULT_PREVIEW_MAX_CHARS = 300
 
 // ROI 枠のリサイズハンドル定義（表示上の位置と、掴んだときのカーソル形状）。
 // 実際の当たり判定は h-11 w-11（44px 角）で、見た目の小さな丸印より大きく取る
@@ -115,6 +135,14 @@ const PSM_OPTIONS: { value: OcrOptions['psm']; label: string }[] = [
   { value: '7', label: '単一行' },
   { value: '8', label: '単語' },
   { value: '6', label: 'ブロック' },
+]
+
+// バーコードの読み取り契機の選択肢（バーコードモードのセグメント切り替え用）。
+// hint は選択中のときだけ画面に出す一行説明で、現場の人が「今どっちなのか」を
+// 迷わないようにするためのもの。
+const TRIGGER_MODE_OPTIONS: { value: BarcodeTriggerMode; label: string; hint: string }[] = [
+  { value: 'continuous', label: '常に読む', hint: 'カメラを向けている間ずっと読み取ります。' },
+  { value: 'hold', label: '長押し中だけ', hint: '下の読み取りボタンを押している間だけ読み取ります。' },
 ]
 
 const FILTER_OPTIONS: { value: OcrFilterMode; label: string }[] = [
@@ -163,6 +191,94 @@ function CapturedImageCanvas({ image, className }: { image: ImageData; className
   return <canvas ref={canvasRef} className={className} style={{ imageRendering: 'pixelated' }} />
 }
 
+// 結果一覧の1行。行ごとに「全文を表示するか」の状態を持たせたいので、
+// 一覧の map の中に直接書かずコンポーネントとして切り出してある
+// （展開状態を親が Set などで一括管理すると、1行開くだけで一覧全体の
+// 再レンダーを誘発してしまい、値の長い行が並ぶ状況ではまさに避けたい負荷になる）。
+function ResultRow({
+  item,
+  filterMode,
+  onCopy,
+  onDelete,
+}: {
+  item: ResultItem
+  filterMode: OcrFilterMode
+  onCopy: (value: string) => void
+  onDelete: (id: number) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+
+  // コピーに使う値は常に完全な値。切り詰めるのは「見せ方」だけ。
+  const value = displayValueOf(item, filterMode)
+  // 表示された値が元の読み取り値と違うときだけ、その下に元の値を小さく添える
+  // （OCR: フィルタで絞り込んだとき / バーコード: 整形ルールで削られたとき）。
+  const showRaw = value !== item.raw
+  // 一覧の表示だけ、制御文字（GSなど）を目に見える記号にする。コピーする値
+  // （value・item.raw そのもの）は一切変えない。バーコードだけに適用する
+  // （OCRの改行等まで記号化すると、複数行のOCR結果が読みにくくなるため）。
+  const visualized = item.source === 'barcode' ? visualizeControlChars(value) : value
+  const visualizedRaw = item.source === 'barcode' ? visualizeControlChars(item.raw) : item.raw
+
+  const preview = truncateForDisplay(visualized, RESULT_PREVIEW_MAX_CHARS)
+  const rawPreview = truncateForDisplay(visualizedRaw, RESULT_PREVIEW_MAX_CHARS)
+  const displayValue = expanded ? visualized : preview.text
+  const displayRaw = expanded ? visualizedRaw : rawPreview.text
+  const canExpand = preview.truncated || rawPreview.truncated
+
+  return (
+    <li className="flex items-start gap-2 p-3">
+      <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${sourceBadgeClass(item.source)}`}>
+        {sourceBadgeLabel(item.source)}
+      </span>
+      <div className="min-w-0 flex-1">
+        <pre className="whitespace-pre-wrap break-all font-mono text-sm text-slate-100">
+          {displayValue === '' ? '(空文字)' : displayValue}
+          {!expanded && preview.truncated && <span className="text-slate-500">…</span>}
+        </pre>
+        {showRaw && (
+          <p className="mt-0.5 whitespace-pre-wrap break-all text-[11px] text-slate-500">
+            元の読み取り: {displayRaw}
+            {!expanded && rawPreview.truncated && '…'}
+          </p>
+        )}
+        {canExpand && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            className="mt-1 rounded bg-slate-800 px-2 py-1 text-[11px] font-semibold text-cyan-300 active:bg-slate-700"
+          >
+            {expanded
+              ? '表示を短くする'
+              : `全${Array.from(visualized).length}文字を表示（残り${preview.omittedChars}文字）`}
+          </button>
+        )}
+        {canExpand && (
+          <p className="mt-0.5 text-[10px] text-slate-500">
+            ※表示だけを短くしています。コピーされる値は常に全文です。
+          </p>
+        )}
+      </div>
+      <button
+        type="button"
+        onClick={() => onCopy(value)}
+        aria-label="この行をコピー"
+        className="shrink-0 rounded-lg p-1.5 text-slate-300 active:bg-slate-800"
+      >
+        <CopyIcon className="h-4 w-4" />
+      </button>
+      <button
+        type="button"
+        onClick={() => onDelete(item.id)}
+        aria-label="この行を削除"
+        className="shrink-0 rounded-full p-1.5 text-slate-400 active:bg-slate-800"
+      >
+        <CloseIcon className="h-4 w-4" />
+      </button>
+    </li>
+  )
+}
+
 export function SimpleScanScreen() {
   // 画質プリセットは起動直後の最初の getUserMedia 要求から効かせたいため、
   // useState の遅延初期化で1度だけ localStorage を読み、useCamera に渡す
@@ -170,11 +286,26 @@ export function SimpleScanScreen() {
   const [initialCaptureQuality] = useState(loadCaptureQuality)
   const camera = useCamera(initialCaptureQuality)
 
+  // バーコードの読み取り契機（常に読む / 読み取りボタンを長押ししている間だけ読む）。
+  // 現場フィードバック: 現品票が密集している棚では、狙っていない隣のラベルまで
+  // 勝手に拾ってしまうため「押している間だけ読みたい」という要望があった。
+  // 一方で棚卸しのように次々に読んでいく作業では常時読み取りのほうが速いので、
+  // どちらかに寄せるのではなく切り替えられるようにしてある。
+  // 前回選んでいた契機を次回起動時も復元する（既定は従来通り 'continuous'）。
+  const [triggerMode, setTriggerMode] = useState<BarcodeTriggerMode>(loadBarcodeTriggerMode)
+  // 「長押し中だけ」モードで、読み取りボタンが今まさに押されているか。
+  // これは操作の瞬間そのものなので永続化しない（起動時は必ず「押していない」から始める）。
+  const [holdActive, setHoldActive] = useState(false)
+
   // 読み取りモード（バーコード / 文字）。前回選んでいたモードを次回起動時も復元する。
   const [mode, setMode] = useState<ScanMode>(loadScanMode)
   const handleChangeMode = useCallback((next: ScanMode) => {
     setMode(next)
     saveScanMode(next)
+    // モードを切り替えた瞬間に指が離れる保証はないため、押下状態は必ず落としておく
+    // （文字モードへ移ったあとも holdActive が true のまま残ると、バーコードモードへ
+    // 戻った瞬間に押していないのに読み取りが走ってしまう）。
+    setHoldActive(false)
   }, [])
 
   const [results, setResults] = useState<ResultItem[]>([])
@@ -222,6 +353,14 @@ export function SimpleScanScreen() {
   // 手動で開く。開いている間はカメラがどこを向いているか分からなくなるため、
   // isAnyOverlayOpen 経由でバーコード検出を止める（下の overlaysOpen を参照）。
   const [helpOpen, setHelpOpen] = useState(false)
+
+  // ライセンス情報パネル。使い方パネルの中のボタンから開き、その上に重ねて表示する
+  // （使い方パネルは開いたまま。閉じると使い方パネルへ戻る）。
+  // 使い方パネル・整形パネルと同様、全画面でカメラが見えなくなるため
+  // isAnyOverlayOpen 経由でバーコード検出を止める。
+  const [licenseOpen, setLicenseOpen] = useState(false)
+  const handleOpenLicenses = useCallback(() => setLicenseOpen(true), [])
+  const handleCloseLicenses = useCallback(() => setLicenseOpen(false), [])
 
   const [ocrBusy, setOcrBusy] = useState(false)
   const [ocrProgress, setOcrProgress] = useState<OcrProgress | null>(null)
@@ -278,7 +417,18 @@ export function SimpleScanScreen() {
   const ensureOcrPreloaded = useCallback(() => {
     if (preloadTriggeredRef.current) return
     preloadTriggeredRef.current = true
-    void preloadOcr((p) => setOcrProgress(p))
+    // preloadOcr は失敗しても reject せず { ok: false, error } を返す契約
+    // （呼び捨てで unhandled rejection にならないようにするため）。
+    // ここで ok を見ずに捨ててしまうと、学習データが読めていないことに誰も気づけず、
+    // 「シャッターを押しても毎回失敗するが理由が分からない」状態になる
+    // （.gz 展開に依存していた頃、実機でまさにこれが起きていた）。
+    // 事前読み込みの失敗自体は致命的ではない（実際の認識時に改めて初期化を試みる）ため、
+    // 処理は止めず、軽い通知に留めたうえで次回のシャッターで再試行できるようにする。
+    void preloadOcr((p) => setOcrProgress(p)).then((result) => {
+      if (result.ok) return
+      preloadTriggeredRef.current = false // 次のシャッターでもう一度初期化を試させる
+      showToast(result.error, 'error')
+    })
   }, [])
 
   // 画面はこれ1つしかないため、マウント時にカメラを起動しアンマウント時に止めるだけでよい
@@ -289,9 +439,16 @@ export function SimpleScanScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // ブラウザタブ自体の前面/背面をハンドリングする
+  // ブラウザタブ自体の前面/背面をハンドリングする。
+  // 画面が背面に回った時点で押下状態も落とす: 押したままアプリを切り替えると
+  // pointerup が届かないことがあり、戻ってきたときに押していないのに
+  // 読み取りが走り続ける状態になってしまうため。
   useEffect(() => {
-    const handleVisibility = () => setPageVisible(document.visibilityState === 'visible')
+    const handleVisibility = () => {
+      const visible = document.visibilityState === 'visible'
+      setPageVisible(visible)
+      if (!visible) setHoldActive(false)
+    }
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [])
@@ -368,6 +525,34 @@ export function SimpleScanScreen() {
     })
   }, [])
 
+  // 読み取り契機の切り替え。切り替えた瞬間に押下状態を落とすのはもちろん、
+  // 「長押し中だけ」へ移るときは手動一時停止も解除する。長押しモードでは
+  // 一時停止ボタン自体を出さないため、以前の一時停止状態が残ったままだと
+  // 「ボタンを押しているのに読めない」という解除不能な行き止まりになるため。
+  const handleChangeTriggerMode = useCallback((next: BarcodeTriggerMode) => {
+    setTriggerMode(next)
+    saveBarcodeTriggerMode(next)
+    setHoldActive(false)
+    if (next === 'hold') setManualPaused(false)
+  }, [])
+
+  // 読み取りボタンの押下開始。setPointerCapture により、押したまま指がボタンの外へ
+  // ずれても pointerup/pointercancel が必ずこの要素に届くようにする
+  // （キャプチャしないと、指がずれた瞬間に押しっぱなし状態が残り、離しても
+  // 読み取りが止まらなくなる）。
+  const handleHoldStart = useCallback((e: ReactPointerEvent<HTMLButtonElement>) => {
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId)
+    } catch {
+      // キャプチャに対応していない環境でも、下の setHoldActive(true) 自体は行う
+    }
+    setHoldActive(true)
+  }, [])
+
+  const handleHoldEnd = useCallback(() => {
+    setHoldActive(false)
+  }, [])
+
   const handleToggleRestrictToRoi = useCallback(() => {
     setRestrictToRoi((prev) => {
       const next = !prev
@@ -392,8 +577,8 @@ export function SimpleScanScreen() {
   // 使い方パネル・整形パネルはどちらも全画面表示でカメラがどこを向いているか
   // 分からなくなるため、開いている間は常にバーコード検出を止める。
   const overlaysOpen = useMemo(
-    () => isAnyOverlayOpen({ ocrResultPanelOpen: ocrBusy, helpOpen, trimPanelOpen }),
-    [ocrBusy, helpOpen, trimPanelOpen],
+    () => isAnyOverlayOpen({ ocrResultPanelOpen: ocrBusy, helpOpen, trimPanelOpen, licenseOpen }),
+    [ocrBusy, helpOpen, trimPanelOpen, licenseOpen],
   )
 
   // バーコード検出を有効にすべきかは isBarcodeScanEnabled（純粋関数）だけで判定する。
@@ -408,8 +593,12 @@ export function SimpleScanScreen() {
         manualPaused,
         overlaysOpen,
         mode,
+        // 「長押し中だけ」モードの停止も、専用の分岐ではなくこの述語の条件の
+        // ひとつとして畳み込む（scanGating.ts の isTriggerSatisfied を参照）。
+        triggerMode,
+        holdActive,
       }),
-    [camera.ready, pageVisible, manualPaused, overlaysOpen, mode],
+    [camera.ready, pageVisible, manualPaused, overlaysOpen, mode, triggerMode, holdActive],
   )
 
   const { backend, error: scannerError, detectBoxes } = useBarcodeScanner({
@@ -432,9 +621,15 @@ export function SimpleScanScreen() {
     onScan: handleScan,
   })
 
-  useEffect(() => {
-    if (scannerError) showToast(scannerError, 'error')
-  }, [scannerError])
+  // scannerError はトーストではなくバナーとして出す。
+  // useBarcodeScanner 側は2種類の異常をこの1つの state で表現している:
+  //   - 一過性のもの（ウォッチドッグ発火・zxing の連続デコード失敗からの自動復旧）は
+  //     数秒後に自分で null へ戻す
+  //   - 自動復旧を諦めた恒久的なもの（アプリの再読み込みが必要）は null へ戻さない
+  // 「値がセットされている間だけ出す」バナーにしておけば、この2種類を
+  // 呼び出し側が区別しなくても、前者は自然に消え、後者は出続ける。
+  // 消えてしまうトーストだと、後者の「再読み込みが必要」という重要な状態を
+  // 5秒で見失ってしまう。
 
   const ocrOptions = useMemo(() => ({ psm }), [psm])
 
@@ -486,19 +681,31 @@ export function SimpleScanScreen() {
     // シャッター1回につき1回だけ行う（フレームごとには絶対に行わない）。
     // detectBoxes は失敗しても例外を投げず空配列を返す設計なので、ここでは
     // マスクなしで続行するフォールバックだけ考えればよい。
-    void detectBoxes(captured.frame).then((boxes) => {
-      const candidates = boxesToMask(boxes, captured.videoRoi)
-      // 検出枠は「縞がありそうな領域」の候補にすぎないため、実ピクセルを見て
-      // 縞が密集している行の帯まで縦方向に縮めてから塗りつぶしに使う
-      // （隣接する文字まで一緒に塗りつぶしてしまうのを防ぐため）。
-      const maskRects = trimBarcodeBoxesToStripes(captured.frame, candidates)
-      capturedFrameRef.current = { frame: captured.frame, videoRoi: captured.videoRoi, maskRects }
-      const useMask = autoMaskEnabled && maskRects.length > 0
-      const image = cropVideoSpaceRoi(captured.frame, captured.videoRoi, useMask ? maskRects : undefined)
-      setCapturedImage(image)
-      setMaskedCount(useMask ? maskRects.length : 0)
-      runRecognition(image)
-    })
+    // .catch() は必須。ここを落とすと、detectBoxes 自体は空配列を返す設計でも、
+    // 続く trimBarcodeBoxesToStripes / cropVideoSpaceRoi が例外を投げた場合
+    // （巨大フレームでの getImageData 失敗や 2D コンテキスト取得失敗など）に
+    // unhandled rejection になるうえ、直前に立てた ocrBusy が誰にも降ろされず
+    // 「シャッターボタンが回り続けたまま二度と押せない」行き止まりになる。
+    void detectBoxes(captured.frame)
+      .then((boxes) => {
+        const candidates = boxesToMask(boxes, captured.videoRoi)
+        // 検出枠は「縞がありそうな領域」の候補にすぎないため、実ピクセルを見て
+        // 縞が密集している行の帯まで縦方向に縮めてから塗りつぶしに使う
+        // （隣接する文字まで一緒に塗りつぶしてしまうのを防ぐため）。
+        const maskRects = trimBarcodeBoxesToStripes(captured.frame, candidates)
+        capturedFrameRef.current = { frame: captured.frame, videoRoi: captured.videoRoi, maskRects }
+        const useMask = autoMaskEnabled && maskRects.length > 0
+        const image = cropVideoSpaceRoi(captured.frame, captured.videoRoi, useMask ? maskRects : undefined)
+        setCapturedImage(image)
+        setMaskedCount(useMask ? maskRects.length : 0)
+        // runRecognition は自身の finally で ocrBusy を降ろすので、ここでは降ろさない
+        runRecognition(image)
+      })
+      .catch(() => {
+        showToast('画像の取り込みに失敗しました', 'error')
+        setOcrBusy(false)
+        setOcrProgress(null)
+      })
   }, [ocrBox.isDragging, ocrBox.roi, helpOpen, camera.videoRef, camera.ready, ensureOcrPreloaded, detectBoxes, autoMaskEnabled, runRecognition])
 
   // 撮影しなおさず、現在の PSM・マスク設定で同じ静止フレームを読み直す
@@ -525,9 +732,12 @@ export function SimpleScanScreen() {
     setAutoMaskEnabled(checked)
   }, [])
 
-  const handleCopyRow = useCallback(async (value: string) => {
-    const ok = await copyToClipboard(value)
-    showToast(ok ? 'コピーしました' : 'コピーに失敗しました', ok ? 'success' : 'error')
+  // ResultRow へは「呼ぶだけ」の同期的な口として渡すため、ここで await を閉じ込める
+  // （行側に Promise の扱いを持ち込まない）。
+  const handleCopyRow = useCallback((value: string) => {
+    void copyToClipboard(value).then((ok) => {
+      showToast(ok ? 'コピーしました' : 'コピーに失敗しました', ok ? 'success' : 'error')
+    })
   }, [])
 
   const handleDeleteRow = useCallback((id: number) => {
@@ -688,6 +898,23 @@ export function SimpleScanScreen() {
           </div>
         )}
 
+        {/* 「長押し中だけ」モードの状態表示。今読んでいるのか待っているのかが
+            映像を見たまま分かるようにする（一時停止中の赤い表示とは排他。
+            長押しモードでは一時停止ボタン自体を出さないため両方出ることはない）。 */}
+        {mode === 'barcode' && triggerMode === 'hold' && !manualPaused && !camera.error && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-10 z-20 flex justify-center px-4">
+            {holdActive ? (
+              <span className="flex items-center gap-2 rounded-full bg-cyan-500/95 px-4 py-2 text-sm font-bold text-slate-950 shadow-xl">
+                <ScanIcon className="h-4 w-4" /> 読み取り中
+              </span>
+            ) : (
+              <span className="flex items-center gap-2 rounded-full bg-slate-900/90 px-4 py-2 text-sm font-bold text-slate-300 shadow-xl">
+                ボタンを押している間だけ読み取ります
+              </span>
+            )}
+          </div>
+        )}
+
         {!camera.ready && !camera.error && (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
             <SpinnerIcon className="h-8 w-8 text-slate-400" />
@@ -837,6 +1064,44 @@ export function SimpleScanScreen() {
           </div>
         )}
 
+        {/* バーコード読み取りの異常通知。一過性のものは数秒で自動的に消え、
+            自動復旧を諦めた恒久的なものだけが出続ける（上の scannerError の説明を参照）。 */}
+        {scannerError && (
+          <div className="flex items-start gap-2 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-2">
+            <WarningIcon className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            <p className="text-[11px] font-semibold leading-relaxed text-amber-200">{scannerError}</p>
+          </div>
+        )}
+
+        {/* 読み取り契機の切り替え（バーコードモード専用）。画質プリセットと同じ
+            セグメント型にして、「設定はこの帯に並ぶ」という見た目の一貫性を保つ。 */}
+        {mode === 'barcode' && (
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-[11px]">
+              <span className="shrink-0 font-semibold text-slate-400">読み取り</span>
+              <div role="radiogroup" aria-label="バーコードの読み取り契機" className="flex flex-1 gap-1 rounded-lg bg-slate-800 p-0.5">
+                {TRIGGER_MODE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={triggerMode === opt.value}
+                    onClick={() => handleChangeTriggerMode(opt.value)}
+                    className={`min-h-8 flex-1 rounded-md text-[11px] font-bold transition-colors ${
+                      triggerMode === opt.value ? 'bg-cyan-500 text-slate-950' : 'text-slate-400 active:bg-slate-700'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <p className="pl-[3.25rem] text-[10px] text-slate-500">
+              {TRIGGER_MODE_OPTIONS.find((opt) => opt.value === triggerMode)?.hint}
+            </p>
+          </div>
+        )}
+
         {/* 画質プリセット: バーコード読み取りの負荷とカメラ解像度のトレードオフ設定。
             「枠内のみ」のクロップ最適化で足りないときの保険なので、控えめな見た目にする。
             既定は「最大」（今回の精度改善を退行させないため）。 */}
@@ -865,17 +1130,46 @@ export function SimpleScanScreen() {
         <div className="flex items-center gap-2">
           {mode === 'barcode' && (
             <>
-              <button
-                type="button"
-                onClick={() => setManualPaused((p) => !p)}
-                aria-pressed={manualPaused}
-                className={`flex min-h-14 flex-1 items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-bold ${
-                  manualPaused ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-slate-200'
-                }`}
-              >
-                {manualPaused ? <PlayIcon className="h-4 w-4" /> : <PauseIcon className="h-4 w-4" />}
-                {manualPaused ? '再開' : '一時停止'}
-              </button>
+              {/* 「常に読む」モードでは一時停止ボタン、「長押し中だけ」モードでは
+                  読み取りトリガーボタン。この2つは役割が正反対（前者は止めるため、
+                  後者は動かすため）なので、同じ場所で排他に出し分ける。
+                  長押しモードで一時停止ボタンを併存させると「押しているのに読めない」
+                  という原因の分かりにくい行き止まりを作ってしまう。 */}
+              {triggerMode === 'continuous' ? (
+                <button
+                  type="button"
+                  onClick={() => setManualPaused((p) => !p)}
+                  aria-pressed={manualPaused}
+                  className={`flex min-h-14 flex-1 items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-bold ${
+                    manualPaused ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-slate-200'
+                  }`}
+                >
+                  {manualPaused ? <PlayIcon className="h-4 w-4" /> : <PauseIcon className="h-4 w-4" />}
+                  {manualPaused ? '再開' : '一時停止'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  // 押している間だけ読み取る。onPointerDown/Up だけでなく
+                  // pointercancel（システムのジェスチャ等に横取りされた場合）も必ず拾う。
+                  // これを取りこぼすと押しっぱなし状態が残り、指を離しても止まらなくなる。
+                  onPointerDown={handleHoldStart}
+                  onPointerUp={handleHoldEnd}
+                  onPointerCancel={handleHoldEnd}
+                  // 長押しは Android の「テキスト選択」「コンテキストメニュー」を
+                  // 誘発しやすいため、touch-none / select-none と併せて明示的に抑止する。
+                  onContextMenu={(e) => e.preventDefault()}
+                  aria-label="押している間だけバーコードを読み取る"
+                  aria-pressed={holdActive}
+                  disabled={!camera.ready}
+                  className={`flex min-h-14 flex-1 touch-none select-none items-center justify-center gap-1.5 rounded-xl px-3 text-xs font-bold transition-colors disabled:opacity-50 ${
+                    holdActive ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-200'
+                  }`}
+                >
+                  <ScanIcon className="h-5 w-5" />
+                  {holdActive ? '読み取り中…' : '押して読み取り'}
+                </button>
+              )}
 
               <button
                 type="button"
@@ -949,48 +1243,15 @@ export function SimpleScanScreen() {
           <p className="p-6 text-center text-sm text-slate-500">まだ結果がありません</p>
         ) : (
           <ul className="divide-y divide-slate-800">
-            {results.map((item) => {
-              const value = displayValueOf(item, filterMode)
-              // 表示された値が元の読み取り値と違うときだけ、その下に元の値を小さく添える
-              // （OCR: フィルタで絞り込んだとき / バーコード: 整形ルールで削られたとき）。
-              const showRaw = value !== item.raw
-              // 一覧の表示だけ、制御文字（GSなど）を目に見える記号にする。コピーする値
-              // （value・item.raw そのもの）は一切変えない。バーコードだけに適用する
-              // （OCRの改行等まで記号化すると、複数行のOCR結果が読みにくくなるため）。
-              const displayValue = item.source === 'barcode' ? visualizeControlChars(value) : value
-              const displayRaw = item.source === 'barcode' ? visualizeControlChars(item.raw) : item.raw
-              return (
-                <li key={item.id} className="flex items-start gap-2 p-3">
-                  <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${sourceBadgeClass(item.source)}`}>
-                    {sourceBadgeLabel(item.source)}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <pre className="whitespace-pre-wrap break-all font-mono text-sm text-slate-100">
-                      {displayValue === '' ? '(空文字)' : displayValue}
-                    </pre>
-                    {showRaw && (
-                      <p className="mt-0.5 whitespace-pre-wrap break-all text-[11px] text-slate-500">元の読み取り: {displayRaw}</p>
-                    )}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => void handleCopyRow(value)}
-                    aria-label="この行をコピー"
-                    className="shrink-0 rounded-lg p-1.5 text-slate-300 active:bg-slate-800"
-                  >
-                    <CopyIcon className="h-4 w-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteRow(item.id)}
-                    aria-label="この行を削除"
-                    className="shrink-0 rounded-full p-1.5 text-slate-400 active:bg-slate-800"
-                  >
-                    <CloseIcon className="h-4 w-4" />
-                  </button>
-                </li>
-              )
-            })}
+            {results.map((item) => (
+              <ResultRow
+                key={item.id}
+                item={item}
+                filterMode={filterMode}
+                onCopy={handleCopyRow}
+                onDelete={handleDeleteRow}
+              />
+            ))}
           </ul>
         )}
       </div>
@@ -1018,7 +1279,22 @@ export function SimpleScanScreen() {
             </div>
           }
         >
-          <HelpSheet onClose={handleCloseHelp} />
+          <HelpSheet onClose={handleCloseHelp} onOpenLicenses={handleOpenLicenses} />
+        </Suspense>
+      )}
+
+      {/* ライセンス情報パネル。別チャンクなので、開くまでは読み込まれない。
+          使い方パネルより後ろに書いてあるが、前後関係は DOM の並び順ではなく
+          LicenseSheet 側の z-[80]（使い方パネルは z-[70]）で決めている。 */}
+      {licenseOpen && (
+        <Suspense
+          fallback={
+            <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950">
+              <SpinnerIcon className="h-8 w-8 text-slate-400" />
+            </div>
+          }
+        >
+          <LicenseSheet onClose={handleCloseLicenses} />
         </Suspense>
       )}
 

@@ -1,11 +1,15 @@
 // OCR 前処理: 映像から関心領域 (ROI) を切り出し、グレースケール化・
-// 画素数予算に基づくスケーリングを行う。外部ライブラリに依存しない純粋な canvas 処理。
+// コントラスト正規化・文字行の高さ基準でのスケーリングを行う。
+// 外部ライブラリに依存しない純粋な canvas 処理。
 //
 // 以前はここでヒストグラムから大津の手法によるしきい値を求めて二値化していたが、
 // Tesseract は内部で自前の適応的二値化を行うため、事前にハード二値化した画像より
 // 素のグレースケール画像の方が概して認識精度が良い。ROI 帯にバーコードのバーが
 // 写り込むと、大津の二値化はそれを大きな黒い塊にしてしまい、むしろ有害だった。
 // そのため二値化は行わず、グレースケール化とスケーリングのみを行う。
+// コントラスト正規化（normalizeContrast、下記）を追加したのも同じ方針の範囲内で、
+// あくまで輝度の線形変換に留めており、しきい値判定で白黒二択に振り分ける
+// 二値化とは別物である。
 
 import type { NormalizedRect } from '../barcode/types'
 import { normalizedRectToPixels } from './mask'
@@ -25,32 +29,91 @@ function frameSize(source: FrameSource): { width: number; height: number } {
 
 // OCR に渡す画像の出力画素数の上限。Tesseract は画像が大きいほど時間がかかるため、
 // 「文字が判別できる最小限の解像度」に抑えることでレスポンスを大幅に改善する。
-export const OCR_PIXEL_BUDGET = 300_000
+//
+// 以前は 300,000 だったが、下記の「行の高さ基準」でスケールを決める方式に変えたところ、
+// 実機の高解像度カメラ（12MP級）で撮った横長の ROI では、行の高さを満たすだけの
+// スケールでも出力の総画素数（幅 × 高さ）がこの値をすぐに超えてしまい、必要以上に
+// 縮小されて逆行してしまうことが分かった。Tesseract 1回の認識にかかる時間は
+// 手元の検証で数百ms〜1秒程度の幅があり、1,200,000px（例: 1200×1000相当）程度までは
+// 実用上許容できる遅さに収まる一方、行の高さ基準で決めた妥当なスケールを
+// 極端に狭めてしまわない値として引き上げた。
+export const OCR_PIXEL_BUDGET = 1_200_000
+
+// 出力画像の目標の高さ（px）。
+//
+// Tesseract の LSTM エンジンは、テキスト行の高さがおよそ 30〜40px 程度のときに
+// もっとも認識精度が高いとされる（本アプリの既定 PSM である「単一行」を前提とした
+// 一般的な目安）。ROI はユーザーが「文字を囲むように」枠を調整して使う運用のため、
+// ROI の高さは概ね「文字行の高さ＋上下のわずかな余白」とみなせる。
+//
+// 96px という値の根拠（1行だけの ROI と、数行分の ROI の両方を想定して決めている）:
+// - ROI が1行ぴったりの文字を囲んでいる場合、96px までスケールすると文字本体の
+//   高さは余白を差し引いてもおよそ70〜90px程度になる。最適レンジ（30〜40px）より
+//   大きいが、小さすぎて潰れるより大きすぎる方が安全側に振れるため許容する。
+// - ROI が数行分（2〜3行）の文字をまとめて囲んでいる場合、96px を行数で割ると
+//   1行あたりおよそ30〜48pxになり、最適レンジにちょうど収まる。
+// つまり「1行だけを囲む」使い方と「数行まとめて囲む」使い方のどちらでも大きく
+// 外れない妥協点として 96px を選んでいる。
+export const TARGET_ROI_HEIGHT_PX = 96
+
+// 上限4倍: 高さ24px未満のごく小さいROI（バーコードの至近距離撮影など）を
+// 96pxまで引き伸ばそうとすると4倍を超えることがあるが、拡大率をこれ以上
+// 増やしても新しい情報が生まれるわけではなく、単に処理時間とメモリを
+// 浪費するだけなので頭打ちにする。
+const MAX_HEIGHT_SCALE = 4
+
+// 下限0.2: 巨大なROI（実機の高解像度カメラ等）でTARGET_ROI_HEIGHT_PXに
+// 合わせようとする倍率がどれだけ小さくなっても、5分の1未満まで縮小すると
+// 文字のストロークが数画素まで潰れて情報そのものが失われてしまうため、
+// これより下には落とさない（この下限を維持したまま画素数予算をオーバーする
+// 場合は、後段の画素数予算チェックがこの下限を無視してでも追加で縮小する。
+// 「予算を守る」ことを最優先にするための意図的な仕様）。
+const MIN_HEIGHT_SCALE = 0.2
 
 // ROI の実サイズ（sw × sh）から、拡大縮小のスケール係数を求める純粋関数。
-// - 小さい ROI はそのまま 2 倍に拡大する（文字が小さすぎると認識精度が落ちるため）
-// - 2 倍した結果が画素数予算を超える場合は、予算にちょうど収まるところまでスケールを落とす
-// - 最終的なスケールは [0.6, 2] の範囲にクランプする（縮小しすぎると文字が潰れるため）
+//
+// 以前は「入力ROIの画素数（sw×sh）だけ」からスケールを決めており、実際の文字の
+// 大きさを一切見ていなかった。この方式には致命的な欠陥があった: 同じ物理的な
+// 大きさの文字を撮っていても、カメラの解像度が高いほど ROI の画素数（sw×sh）は
+// 大きくなるため、高解像度カメラ（実機のAPK版、既定は quality.ts の 'max' =
+// 3840x2160 ideal）ほど強く縮小され、逆に低解像度カメラ（PCブラウザのWeb版検証、
+// 720p程度）ほど強く拡大されるという、実際の文字サイズとは正反対の結果になって
+// いた。「PCでは2倍に拡大され精度が良く見えるのに、実機では0.6倍に縮小され
+// 精度が落ちて見える」という体感の主因はこれだった。
+//
+// これを解消するため、まず ROI の「高さ」から倍率を決める（下記 第1段階）。
+// ROI の高さは撮影解像度に関わらず「文字行の高さ＋余白」を表しているため、
+// 高さ基準でスケールを決めれば、同じ大きさの文字は入力解像度に関係なく
+// 常にほぼ同じ出力サイズ・同じ倍率になる。そのうえで、処理時間を守るための
+// 画素数予算チェックを第2段階として別に行う（第1段階のクランプ範囲を
+// 無視してでも予算内に収める。「予算がクランプに破られて機能しなくなる」
+// という以前の不整合を無くすため、意図的に2段構えにしている）。
+//
 // - sw・sh が 0 以下や NaN であっても、有限の正の値を返し、絶対に例外を投げない
 export function computeOcrScale(sw: number, sh: number): number {
   const safeW = Number.isFinite(sw) && sw > 0 ? sw : 1
   const safeH = Number.isFinite(sh) && sh > 0 ? sh : 1
 
-  const preferredScale = 2
-  const sourcePixels = safeW * safeH
-  const preferredPixels = sourcePixels * preferredScale * preferredScale
+  // 第1段階: 出力の「高さ」が TARGET_ROI_HEIGHT_PX に近づく倍率を第一候補にする。
+  let scale = TARGET_ROI_HEIGHT_PX / safeH
+  scale = Math.min(MAX_HEIGHT_SCALE, Math.max(MIN_HEIGHT_SCALE, scale))
 
-  let scale = preferredScale
-  if (preferredPixels > OCR_PIXEL_BUDGET) {
+  // 第2段階: 上記の倍率で出力した場合の画素数が予算を超える場合だけ、
+  // 予算にちょうど収まるところまでスケールを下げる（第1段階の下限は無視する）。
+  const sourcePixels = safeW * safeH
+  const outputPixels = sourcePixels * scale * scale
+  if (outputPixels > OCR_PIXEL_BUDGET) {
     // sourcePixels * scale^2 = OCR_PIXEL_BUDGET を満たす scale まで落とす
     scale = Math.sqrt(OCR_PIXEL_BUDGET / sourcePixels)
   }
 
   if (!Number.isFinite(scale) || scale <= 0) {
-    scale = 0.6
+    // safeW/safeH が常に 1 以上のため実際にはここに到達しない想定だが、
+    // 万一の計算不能ケースに備えた最終防波堤（等倍＝無変換）
+    scale = 1
   }
 
-  return Math.min(2, Math.max(0.6, scale))
+  return scale
 }
 
 function getContext2d(canvas: OffscreenCanvas): OffscreenCanvasRenderingContext2D {
@@ -61,19 +124,51 @@ function getContext2d(canvas: OffscreenCanvas): OffscreenCanvasRenderingContext2
   return ctx
 }
 
-// scale >= 1: ニアレストネイバーで拡大する（グレースケールのまま。二値化はしない）
+// scale >= 1: 双線形補間（bilinear）で拡大する（グレースケールのまま。二値化はしない）。
+//
+// 以前はニアレストネイバー（最も近い1画素の値をそのまま使う）で拡大していたが、
+// これは文字のエッジをブロック状のジャギーにしてしまい、LSTM ベースの Tesseract
+// にとってストロークの向きや太さを読み取りにくくする方向に働く。双線形補間は
+// 周囲4画素を距離に応じた重みで混ぜ合わせるため、エッジがなめらかになり、
+// 特に本アプリのように倍率が2〜4倍と大きくなりがちな構成では効果が大きい。
+// 縮小側（resampleDownscale）は逆にボックスフィルタ（平均化）のままにしている。
+// 縮小はエイリアシング対策として「複数の元画素を平均する」ことが本質的に重要で、
+// 双線形補間のような「周囲数画素だけを見る」方式では間引かれる画素の情報が
+// 平均に反映されず、縮小には不向きなため、拡大と縮小で意図的に別のアルゴリズムを
+// 使い分けている。
 function resampleUpscale(gray: Uint8ClampedArray, sw: number, sh: number, scale: number): ImageData {
   const outW = Math.max(1, Math.round(sw * scale))
   const outH = Math.max(1, Math.round(sh * scale))
   const out = new ImageData(outW, outH)
   const outData = out.data
 
+  // 出力画素の中心が入力画像のどの座標に対応するかを、両端の画素中心が
+  // ぴったり揃うように計算する（"half pixel center" 方式）。sw/sh が1の場合は
+  // 0除算を避けるためスケールをそのまま使う。
+  const scaleX = outW > 1 ? (sw - 1) / (outW - 1) : 0
+  const scaleY = outH > 1 ? (sh - 1) / (outH - 1) : 0
+
   for (let y = 0; y < outH; y++) {
-    const srcY = Math.min(sh - 1, Math.floor((y * sh) / outH))
-    const rowOffset = srcY * sw
+    const srcYf = outH > 1 ? y * scaleY : 0
+    const srcY0 = Math.min(sh - 1, Math.floor(srcYf))
+    const srcY1 = Math.min(sh - 1, srcY0 + 1)
+    const wy = srcYf - srcY0
+
     for (let x = 0; x < outW; x++) {
-      const srcX = Math.min(sw - 1, Math.floor((x * sw) / outW))
-      const value = gray[rowOffset + srcX]
+      const srcXf = outW > 1 ? x * scaleX : 0
+      const srcX0 = Math.min(sw - 1, Math.floor(srcXf))
+      const srcX1 = Math.min(sw - 1, srcX0 + 1)
+      const wx = srcXf - srcX0
+
+      // 周囲4画素（左上・右上・左下・右下）を距離の重みで線形補間する
+      const topLeft = gray[srcY0 * sw + srcX0]
+      const topRight = gray[srcY0 * sw + srcX1]
+      const bottomLeft = gray[srcY1 * sw + srcX0]
+      const bottomRight = gray[srcY1 * sw + srcX1]
+      const top = topLeft + (topRight - topLeft) * wx
+      const bottom = bottomLeft + (bottomRight - bottomLeft) * wx
+      const value = Math.round(top + (bottom - top) * wy)
+
       const o = (y * outW + x) * 4
       outData[o] = value
       outData[o + 1] = value
@@ -118,6 +213,74 @@ function resampleDownscale(gray: Uint8ClampedArray, sw: number, sh: number, scal
     }
   }
 
+  return out
+}
+
+// パーセンタイルによるコントラストストレッチ（ヒストグラム正規化）に使う下位/上位の割合。
+// 2%ずつ切り捨てることで、ごく少数の極端に明るい/暗い外れ値（照明の反射・影の一角など）
+// にレンジ全体が引っ張られてしまうのを防ぐ。
+const CONTRAST_STRETCH_PERCENTILE = 0.02
+
+// 下位/上位パーセンタイルの輝度差（レンジ）がこの値未満（＝ほぼ単色）の場合は
+// ストレッチを行わない。ROI がほぼ均一な明るさしか持たない場合（無地の背景だけを
+// 囲んでしまった、あるいは階調差がノイズしかない場合）、狭いレンジを 0..255 いっぱいに
+// 引き伸ばすと、文字と背景の差ではなくノイズだけが何倍にも増幅されてしまい、
+// かえって認識を悪化させるため。256階調のうち16という値は、量子化ノイズや
+// センサーノイズによる数階調程度のゆらぎでは発火せず、実際に文字が写っている
+// 場合に生じる輝度差（数十階調以上が普通）でだけ発火するように選んだ経験的な閾値。
+const CONTRAST_STRETCH_MIN_RANGE = 16
+
+/**
+ * グレースケール画像に対して、パーセンタイルベースの線形コントラストストレッチ
+ * （contrast stretching / percentile normalization）を行う純粋関数。
+ *
+ * 「二値化はしない」という本ファイル冒頭の方針とは矛盾しない。ここで行うのは
+ * あくまで元の輝度の大小関係を保ったままの線形変換
+ * （v' = (v - lo) / (hi - lo) * 255）であり、しきい値で白か黒かの二択に
+ * 振り分ける処理（＝二値化）ではない。倉庫・工場フロアの照明ムラでコントラストが
+ * 低くなりがちな ROI（全体が薄暗いグレーに寄っている等）でも、文字と背景の
+ * 輝度差を Tesseract の内部処理が拾いやすい範囲まで引き伸ばす狙い。
+ *
+ * 入力配列は書き換えず、新しい配列を返す（他のヘルパーと同様の純粋関数にする）。
+ * レンジが狭すぎる場合は CONTRAST_STRETCH_MIN_RANGE のコメントの通りストレッチを
+ * 行わず、入力をそのまま返す。
+ */
+export function normalizeContrast(gray: Uint8ClampedArray): Uint8ClampedArray {
+  const n = gray.length
+  if (n === 0) return gray
+
+  const histogram = new Uint32Array(256)
+  for (let i = 0; i < n; i++) histogram[gray[i]]++
+
+  // 下位側: 累積度数が「全画素数 × パーセンタイル」を超えた最初の階調を lo とする
+  const loBudget = Math.floor(n * CONTRAST_STRETCH_PERCENTILE)
+  let lo = 0
+  let accLo = 0
+  for (; lo < 255; lo++) {
+    accLo += histogram[lo]
+    if (accLo > loBudget) break
+  }
+
+  // 上位側: 同様に、明るい方から累積して超えた最初の階調を hi とする
+  const hiBudget = Math.floor(n * CONTRAST_STRETCH_PERCENTILE)
+  let hi = 255
+  let accHi = 0
+  for (; hi > 0; hi--) {
+    accHi += histogram[hi]
+    if (accHi > hiBudget) break
+  }
+
+  if (hi - lo < CONTRAST_STRETCH_MIN_RANGE) {
+    return gray
+  }
+
+  const range = hi - lo
+  const out = new Uint8ClampedArray(n)
+  for (let i = 0; i < n; i++) {
+    // Uint8ClampedArray への代入時に 0..255 の範囲外は自動的にクランプされるため、
+    // lo 未満・hi 超過の値についてここで個別にクランプする必要はない。
+    out[i] = Math.round(((gray[i] - lo) / range) * 255)
+  }
   return out
 }
 
@@ -318,7 +481,15 @@ export function preprocessRoi(source: FrameSource, roi: RoiRect, maskRects?: Nor
     gray[i] = Math.round(0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2])
   }
 
+  // コントラスト正規化はグレースケール化の後・スケーリングの前に行う。
+  // スケーリング後（特に拡大の双線形補間後）に行うと、補間によってなまった
+  // エッジの輝度差がストレッチの対象になってしまい、ROI 本来のコントラストを
+  // 正しく評価できなくなるため、必ず元の解像度のグレースケール画像に対して行う。
+  const normalized = normalizeContrast(gray)
+
   const scale = computeOcrScale(sw, sh)
 
-  return scale >= 1 ? resampleUpscale(gray, sw, sh, scale) : resampleDownscale(gray, sw, sh, scale)
+  return scale >= 1
+    ? resampleUpscale(normalized, sw, sh, scale)
+    : resampleDownscale(normalized, sw, sh, scale)
 }

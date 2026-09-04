@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isAnyOverlayOpen, isBarcodeScanEnabled, type OverlayFlags } from '../scanGating'
+import { isAnyOverlayOpen, isBarcodeScanEnabled, isTriggerSatisfied, type OverlayFlags } from '../scanGating'
 
 function allClosed(): OverlayFlags {
   return {
@@ -143,5 +143,74 @@ describe('trimPanelOpen（整形パネル）と isBarcodeScanEnabled の組み�
   it('手動一時停止中は整形パネルを閉じても検出は再開しない', () => {
     const overlaysOpen = isAnyOverlayOpen({ trimPanelOpen: false })
     expect(isBarcodeScanEnabled({ ...baseInputs, manualPaused: true, overlaysOpen })).toBe(false)
+  })
+})
+
+describe('triggerMode / holdActive（常時読み取り と 長押し中のみ の切り替え）', () => {
+  const baseInputs = {
+    tabActive: true,
+    cameraReady: true,
+    pageVisible: true,
+    manualPaused: false,
+    overlaysOpen: false,
+    mode: 'barcode' as const,
+  }
+
+  it('triggerMode を省略すると従来通り（常時読み取り）として扱われる', () => {
+    expect(isBarcodeScanEnabled(baseInputs)).toBe(true)
+  })
+
+  it("triggerMode: 'continuous' はボタンを押していなくても true", () => {
+    expect(isBarcodeScanEnabled({ ...baseInputs, triggerMode: 'continuous', holdActive: false })).toBe(true)
+  })
+
+  it("triggerMode: 'hold' でボタンを押していなければ false", () => {
+    expect(isBarcodeScanEnabled({ ...baseInputs, triggerMode: 'hold', holdActive: false })).toBe(false)
+  })
+
+  it("triggerMode: 'hold' で holdActive を省略した場合も false（押していない扱い）", () => {
+    expect(isBarcodeScanEnabled({ ...baseInputs, triggerMode: 'hold' })).toBe(false)
+  })
+
+  it("triggerMode: 'hold' でボタンを押している間だけ true", () => {
+    expect(isBarcodeScanEnabled({ ...baseInputs, triggerMode: 'hold', holdActive: true })).toBe(true)
+  })
+
+  it('長押し中でも、手動一時停止中なら false（他の停止理由が優先される）', () => {
+    expect(
+      isBarcodeScanEnabled({ ...baseInputs, triggerMode: 'hold', holdActive: true, manualPaused: true }),
+    ).toBe(false)
+  })
+
+  it('長押し中でも、オーバーレイが開いていれば false', () => {
+    expect(
+      isBarcodeScanEnabled({ ...baseInputs, triggerMode: 'hold', holdActive: true, overlaysOpen: true }),
+    ).toBe(false)
+  })
+
+  it('長押し中でも、文字（OCR）モードなら false', () => {
+    expect(isBarcodeScanEnabled({ ...baseInputs, triggerMode: 'hold', holdActive: true, mode: 'ocr' })).toBe(false)
+  })
+
+  it('長押し中でも、カメラが未準備なら false', () => {
+    expect(
+      isBarcodeScanEnabled({ ...baseInputs, triggerMode: 'hold', holdActive: true, cameraReady: false }),
+    ).toBe(false)
+  })
+})
+
+describe('isTriggerSatisfied（読み取り契機だけを見る述語）', () => {
+  it('省略時は常時読み取り扱いで true', () => {
+    expect(isTriggerSatisfied({})).toBe(true)
+  })
+
+  it("'continuous' は holdActive によらず true", () => {
+    expect(isTriggerSatisfied({ triggerMode: 'continuous', holdActive: false })).toBe(true)
+    expect(isTriggerSatisfied({ triggerMode: 'continuous', holdActive: true })).toBe(true)
+  })
+
+  it("'hold' は holdActive と一致する", () => {
+    expect(isTriggerSatisfied({ triggerMode: 'hold', holdActive: false })).toBe(false)
+    expect(isTriggerSatisfied({ triggerMode: 'hold', holdActive: true })).toBe(true)
   })
 })
