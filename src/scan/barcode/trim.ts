@@ -14,6 +14,17 @@
 // 前後どちらかを丸ごと捨てる」という、より柔軟な指定もできるようにしてある
 // （ユーザー要望: 「スペース以下などできるだけ柔軟に」）。
 //
+// cutFromLast / cutUpToLast について: 現場から「`*abcdefg*` のように前置も後置も
+// 同じ文字列で囲われている場合、同じ文字だと正確に整形できない」という報告があった。
+// 原因は cutFrom/cutUpTo がどちらも「最初に現れた位置」（indexOf）しか探していなかった
+// ため。cutUpTo は最初の `*` で・cutFrom も最初の `*`（＝cutUpTo と同じ位置）で
+// 探してしまい、cutFrom 単独では先頭の `*` で全部切れて結果が空になる、
+// 中身に同じ区切り文字が含まれると内側で切れる、といった不具合になっていた。
+// これを解決するため、cutUpTo は「最初に現れた位置」のまま・cutFrom を「最後に
+// 現れた位置」に切り替えられるようにした（囲む文字列を1文字ずつ両側から剥がす形）。
+// 探索方向を両方に用意してあるのは、cutUpTo 側を最後にしたいケース
+// （例: 区切り文字が3つ以上あり、最後の区切りより後ろだけ残したい）もあり得るため。
+//
 // 制御文字について（重要）: GS1-128 の可変長フィールドの区切りには FNC1 が使われるが、
 // バーコードデコーダはこれを GS（Group Separator, 0x1D）としてデコード結果の文字列に
 // そのまま含めて返す。この文字は目に見えないため、クリップボードにコピーした値に
@@ -28,10 +39,21 @@ export type TrimRules = {
   stripPrefixes: string[]
   /** 後方一致で取り除く接尾辞（複数指定可）。stripPrefixes と同様、長い順・1回だけ */
   stripSuffixes: string[]
-  /** この文字列が最初に現れた位置以降をすべて捨てる（空文字なら無効） */
+  /** この文字列が現れた位置以降をすべて捨てる（空文字なら無効）。位置は cutFromLast で切り替える */
   cutFrom: string
-  /** この文字列が最初に現れた位置までを捨てる（それより後ろを残す。空文字なら無効） */
+  /**
+   * cutFrom の探索位置を「最初に現れた位置」ではなく「最後に現れた位置」にするか。
+   * 既定は false（従来どおり最初）。前置・後置を同じ文字列で囲うケース（例: `*abc*`）で
+   * cutUpTo と組み合わせて使うことを想定している（詳しくはファイル冒頭のコメント参照）。
+   */
+  cutFromLast: boolean
+  /** この文字列が現れた位置までを捨てる（それより後ろを残す。空文字なら無効）。位置は cutUpToLast で切り替える */
   cutUpTo: string
+  /**
+   * cutUpTo の探索位置を「最初に現れた位置」ではなく「最後に現れた位置」にするか。
+   * 既定は false（従来どおり最初）。
+   */
+  cutUpToLast: boolean
   /** 最後に前後の空白を除去する */
   trimWhitespace: boolean
 }
@@ -41,7 +63,9 @@ export const DEFAULT_TRIM_RULES: TrimRules = {
   stripPrefixes: [],
   stripSuffixes: [],
   cutFrom: '',
+  cutFromLast: false,
   cutUpTo: '',
+  cutUpToLast: false,
   trimWhitespace: false,
 }
 
@@ -63,8 +87,14 @@ type TrimRange = { start: number; end: number }
 
 /**
  * ルールの適用順序（固定・ドキュメント化された順序。ここが挙動の唯一の正）:
- *   1. cutUpTo       … 指定文字列が最初に現れた位置までを捨てる（それより後ろを残す）
- *   2. cutFrom       … 指定文字列が最初に現れた位置以降を全て捨てる
+ *   1. cutUpTo       … 指定文字列が現れた位置までを捨てる（それより後ろを残す）。
+ *                       cutUpToLast が true なら「最後に現れた位置」、false（既定）なら
+ *                       「最初に現れた位置」を使う
+ *   2. cutFrom       … 指定文字列が現れた位置以降を全て捨てる。
+ *                       cutFromLast が true なら「最後に現れた位置」、false（既定）なら
+ *                       「最初に現れた位置」を使う。ただし「最後」で探す場合も、
+ *                       手順1で cutUpTo が切り落とした前半部分に現れた位置は拾わない
+ *                       （start 以降で見つかった位置に限る）
  *   3. stripPrefixes … 長い文字列から順に判定し、一致した最初の1つだけを1回取り除く
  *                       （繰り返し剥がすことはしない。例: ['A'] を "AAB" に適用すると "AB"）
  *   4. stripSuffixes … stripPrefixes と同様、長い順に判定して1回だけ
@@ -75,12 +105,22 @@ function computeTrimRange(value: string, rules: TrimRules): TrimRange {
   let end = value.length
 
   if (rules.cutUpTo) {
-    const idx = value.indexOf(rules.cutUpTo, start)
-    if (idx !== -1 && idx < end) start = idx + rules.cutUpTo.length
+    // 「最後に現れた位置」を探す場合も lastIndexOf に fromIndex を渡す方法では
+    // 「start 以降」を表現できない（lastIndexOf の第2引数は探索の上限であって下限では
+    // ない）ため、全体から探したうえで idx >= start かどうかを別途チェックする。
+    // なお cutUpTo はこの時点でまだ start=0 のため、実質は文字列全体が対象になる。
+    const idx = rules.cutUpToLast ? value.lastIndexOf(rules.cutUpTo) : value.indexOf(rules.cutUpTo, start)
+    if (idx !== -1 && idx >= start && idx < end) start = idx + rules.cutUpTo.length
   }
   if (rules.cutFrom) {
-    const idx = value.indexOf(rules.cutFrom, start)
-    if (idx !== -1 && idx < end) end = idx
+    // cutFrom を「最後に現れた位置」で探すときも、cutUpTo で切り落とした前半部分
+    // （start より前）に現れた区切り文字を誤って拾わないよう、idx >= start を必須にする。
+    // これが無いと `*ab*cd*` で cutUpTo=*(最初) の後に cutFrom=*(最後) を「文字列全体の
+    // 最後の *」として素直に使えばよいだけに見えるが、cutUpTo 側を「最後」にした
+    // 別ケース（start が後ろにずれている場合）では、start より前の * を拾ってしまい
+    // end < start になる壊れた範囲を作りかねないため、常にこのチェックを入れておく。
+    const idx = rules.cutFromLast ? value.lastIndexOf(rules.cutFrom) : value.indexOf(rules.cutFrom, start)
+    if (idx !== -1 && idx >= start && idx < end) end = idx
   }
   // cutUpTo と cutFrom の指定が交差してしまった場合の保険（範囲が負にならないようにする）
   if (start > end) start = end

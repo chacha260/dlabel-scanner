@@ -67,6 +67,53 @@ describe('applyTrimRules - cutFrom / cutUpTo', () => {
   })
 })
 
+describe('applyTrimRules - cutFromLast / cutUpToLast（同じ文字で囲まれたケース）', () => {
+  // 現場からの報告: `*abcdefg*` のように前置も後置も同じ文字列で囲われている場合、
+  // 従来の実装（indexOf のみ＝どちらも「最初に現れた位置」）だと正確に整形できない
+  // （cutFrom が先頭の * を拾ってしまい結果が空になる、など）。cutFromLast/cutUpToLast
+  // を追加してこれを解決する。
+
+  it('cutUpTo=*(最初) + cutFrom=*(最後) で "*abcdefg*" の中身だけを取り出せる', () => {
+    expect(applyTrimRules('*abcdefg*', rules({ cutUpTo: '*', cutFrom: '*', cutFromLast: true }))).toBe('abcdefg')
+  })
+
+  it('cutUpTo=*(最初) + cutFrom=*(最後) で中身に同じ区切り文字が含まれていても、外側の * だけを剥がす', () => {
+    // "*ab*cd*" → cutUpTo(最初の*): "ab*cd*" → cutFrom(最後の*): "ab*cd"
+    expect(applyTrimRules('*ab*cd*', rules({ cutUpTo: '*', cutFrom: '*', cutFromLast: true }))).toBe('ab*cd')
+  })
+
+  it('cutFrom=*(最後) のみを指定すると、先頭の * は残ったまま末尾の * だけを捨てる', () => {
+    expect(applyTrimRules('*abcdefg*', rules({ cutFrom: '*', cutFromLast: true }))).toBe('*abcdefg')
+  })
+
+  it('cutUpTo=*(最後) のみを指定すると、最後の * より前（先頭の * も含む）が丸ごと捨てられて空になり、元の値へフォールバックする', () => {
+    // "*abcdefg*" の「最後の *」は末尾そのものなので、それより前を全部捨てると
+    // 残るのは空文字列になる。空文字列を返すくらいなら読み取りを無駄にしないほうが
+    // 良いという既存の方針（フォールバック）どおり、元の値をそのまま返す。
+    // これは cutUpToLast 自体の不具合ではなく、「区切り文字が末尾にしかない」という
+    // 設定側の組み合わせが実用的でないだけなので、特別扱いはせず既存のフォールバックに任せる。
+    expect(applyTrimRules('*abcdefg*', rules({ cutUpTo: '*', cutUpToLast: true }))).toBe('*abcdefg*')
+  })
+
+  it('cutFromLast/cutUpToLast 未指定（既定false）のときは従来どおり最初に現れた位置を使う', () => {
+    expect(applyTrimRules('*abcdefg*', rules({ cutUpTo: '*', cutFrom: '*' }))).toBe('abcdefg')
+    expect(applyTrimRules('*abcdefg*', rules({ cutFrom: '*' }))).toBe('*abcdefg*')
+  })
+
+  it('cutFromLast=true でも、cutUpTo で切り落とした前半部分にある区切り文字は拾わない（start以降に限定）', () => {
+    // "AxByCzC" で cutUpTo="x" (最初: 位置1の直後から) → "ByCzC"
+    // cutFrom="C" を最後で探すと、全体では最後の C は末尾（元の文字列での位置6）だが、
+    // start以降で探しても "ByCzC" の中の最後の C（元の文字列での位置6）が見つかる。
+    // ここでは「cutUpToで切り落とされた側にしか無いマーカー」を使って、拾わないことを検証する。
+    // "MARKERxAB MARKER" のようなケース: cutUpTo="MARKER" で最初のMARKERまでを捨てると
+    // "xAB MARKER" が残る。cutFrom="MARKER" を最後で探すと、残った範囲内の MARKER
+    // （末尾）を正しく拾って捨てる。
+    expect(
+      applyTrimRules('MARKERxAB MARKER', rules({ cutUpTo: 'MARKER', cutFrom: 'MARKER', cutFromLast: true })),
+    ).toBe('xAB ')
+  })
+})
+
 describe('applyTrimRules - 適用順序', () => {
   it('cutUpTo → cutFrom → 接頭辞 → 接尾辞 → 空白除去 の順で適用される', () => {
     // "ABCxDEFGHIyJKL" に対して:

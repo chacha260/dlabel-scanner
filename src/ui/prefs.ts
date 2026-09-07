@@ -257,7 +257,25 @@ function isStringArray(value: unknown): value is string[] {
 
 // 保存値の形を信用せず、TrimRules として妥当な形かどうかを1フィールドずつ確かめる
 // （localStorage の値は他バージョンのアプリや手動編集で壊れている可能性があるため）。
-function isValidTrimRules(value: unknown): value is TrimRules {
+//
+// 注意: cutFromLast/cutUpToLast は後から追加したフィールドなので、ここでは
+// 「存在しない（=旧バージョンで保存された値）」ことも許容し、必須にはしない。
+// もし必須にしてしまうと、この2フィールドを持たない既存の保存値がすべて
+// isValidTrimRules で弾かれ、DEFAULT_TRIM_RULES（＝整形OFF・全ルール空）まで
+// リセットされてしまう。それは「最後に現れた位置」機能を使わない大多数の
+// 既存ユーザーにとって、アップデートしただけでせっかく設定した整形ルールが
+// 消えるという最悪の体験になるため、欠けている場合は false を補って読み込む
+// （呼び出し側の loadTrimRules で対応）。
+// cutFromLast/cutUpToLast は「無くてもよい」ことを型でも表現する
+// （TrimRules そのものを返り値の型にすると、この2フィールドが常に boolean である
+// ことを TypeScript に約束してしまい、下の loadTrimRules 側で「無ければ false を
+// 補う」という分岐が「常に false 側は通らない」という誤った警告の元になるため）。
+type StoredTrimRules = Omit<TrimRules, 'cutFromLast' | 'cutUpToLast'> & {
+  cutFromLast?: boolean
+  cutUpToLast?: boolean
+}
+
+function isValidTrimRules(value: unknown): value is StoredTrimRules {
   if (value === null || typeof value !== 'object') return false
   const v = value as Record<string, unknown>
   return (
@@ -265,7 +283,9 @@ function isValidTrimRules(value: unknown): value is TrimRules {
     isStringArray(v.stripPrefixes) &&
     isStringArray(v.stripSuffixes) &&
     typeof v.cutFrom === 'string' &&
+    (v.cutFromLast === undefined || typeof v.cutFromLast === 'boolean') &&
     typeof v.cutUpTo === 'string' &&
+    (v.cutUpToLast === undefined || typeof v.cutUpToLast === 'boolean') &&
     typeof v.trimWhitespace === 'boolean'
   )
 }
@@ -273,13 +293,20 @@ function isValidTrimRules(value: unknown): value is TrimRules {
 /**
  * バーコード値の整形（トリミング）ルール。保存値が無い・壊れている場合は
  * DEFAULT_TRIM_RULES（＝OFF）にフォールバックする。
+ * cutFromLast/cutUpToLast が無い旧バージョンの保存値は、両方 false（＝従来通り
+ * 「最初に現れた位置」を使う）を補って読み込む（isValidTrimRules 冒頭のコメント参照）。
  */
 export function loadTrimRules(): TrimRules {
   try {
     const raw = localStorage.getItem(TRIM_RULES_STORAGE_KEY)
     if (raw === null) return DEFAULT_TRIM_RULES
     const parsed: unknown = JSON.parse(raw)
-    return isValidTrimRules(parsed) ? parsed : DEFAULT_TRIM_RULES
+    if (!isValidTrimRules(parsed)) return DEFAULT_TRIM_RULES
+    return {
+      ...parsed,
+      cutFromLast: parsed.cutFromLast ?? false,
+      cutUpToLast: parsed.cutUpToLast ?? false,
+    }
   } catch {
     // プライベートブラウジング等で読めない・壊れている場合は既定値（OFF）で動作させる
     return DEFAULT_TRIM_RULES

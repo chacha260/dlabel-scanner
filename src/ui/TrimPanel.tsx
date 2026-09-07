@@ -44,6 +44,43 @@ type TrimPanelProps = {
 const inputClass =
   'w-full min-h-11 rounded-lg border border-slate-600 bg-slate-900 px-3 font-mono text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400 focus:outline-none'
 
+// cutFrom/cutUpTo それぞれの「最初に現れた位置 / 最後に現れた位置」を切り替える
+// コンパクトなセグメント。スマホの狭い画面で2つ並べても収まるよう、Switch（大きな
+// トグル＋説明文の2行構成）ではなく、Chip（components/Controls.tsx）に近い
+// 小さな2択ボタンの見た目に揃えてある。
+function FirstLastSegment({
+  useLast,
+  onChange,
+  label,
+}: {
+  useLast: boolean
+  onChange: (useLast: boolean) => void
+  label: string
+}) {
+  return (
+    <div className="inline-flex shrink-0 overflow-hidden rounded-lg border border-slate-600" role="group" aria-label={label}>
+      {(
+        [
+          { value: false, text: '最初' },
+          { value: true, text: '最後' },
+        ] as const
+      ).map((opt) => (
+        <button
+          key={opt.text}
+          type="button"
+          onClick={() => onChange(opt.value)}
+          aria-pressed={useLast === opt.value}
+          className={`min-h-9 px-3 text-xs font-semibold ${
+            useLast === opt.value ? 'bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-300 active:bg-slate-700'
+          }`}
+        >
+          {opt.text}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function RuleListEditor({
   title,
   hint,
@@ -150,6 +187,15 @@ export default function TrimPanel({ rules, onChange, previewSeed, onClose }: Tri
     pushRules({ cutFrom: GS_CUT_FROM })
   }
 
+  // 「*abc* のような、前後を同じ文字列で囲まれた中身を取り出す」プリセット。
+  // 区切り文字自体（cutUpTo/cutFrom の値）はラベルごとに違うのでユーザーに任せ、
+  // ここでは「cutUpTo は最初・cutFrom は最後」という探索方向の組み合わせだけを
+  // 1タップで設定する。これが今回の不具合報告（同じ文字で囲われていると正確に
+  // 整形できない）をそのまま解決する導線になっている。
+  function applySurroundPreset(): void {
+    pushRules({ cutUpToLast: false, cutFromLast: true })
+  }
+
   // プレビューは「今の設定でONにしたら」という前提で常に計算する（enabled トグルが
   // OFFの間でもルールを組み立てながら効果を確認できるようにするため）。
   const previewSeedReal = unescapeRuleText(previewText)
@@ -242,12 +288,46 @@ export default function TrimPanel({ rules, onChange, previewSeed, onClose }: Tri
         </section>
 
         <section className="space-y-4 border-b border-slate-800 px-5 py-6">
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={applyGsPreset}
+              className="shrink-0 rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-cyan-200 active:bg-slate-700"
+            >
+              GS(0x1D)以降を削除
+            </button>
+            <button
+              type="button"
+              onClick={applySurroundPreset}
+              className="shrink-0 rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-cyan-200 active:bg-slate-700"
+            >
+              *などで囲まれた中身を取り出す
+            </button>
+          </div>
+          <p className="text-xs leading-snug text-slate-500">
+            上のボタンは「ここまでを捨てる」を<strong className="text-slate-100">最初</strong>、
+            「ここから先を捨てる」を<strong className="text-slate-100">最後</strong>に切り替えるだけです。
+            区切り文字自体（下の欄に入れる <span className="font-mono">*</span> など）は現場のラベルに合わせて入力してください。
+            例えば両方に <span className="font-mono">*</span> を入れると、
+            <span className="mx-1 font-mono text-slate-300">*abcdefg*</span>
+            から<span className="font-mono text-slate-300">abcdefg</span>を取り出せます。
+          </p>
+
           <div>
-            <label className="block text-sm font-semibold text-slate-100" htmlFor="trim-cut-up-to">
-              ここまでを捨てる（cutUpTo）
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="block text-sm font-semibold text-slate-100" htmlFor="trim-cut-up-to">
+                ここまでを捨てる（cutUpTo）
+              </label>
+              <FirstLastSegment
+                label="cutUpTo の探索位置"
+                useLast={rules.cutUpToLast}
+                onChange={(useLast) => pushRules({ cutUpToLast: useLast })}
+              />
+            </div>
             <p className="mt-0.5 text-xs leading-snug text-slate-500">
-              指定した文字列が最初に現れた位置までを捨て、それより後ろだけを残します（マーカー自体は残りません）。
+              指定した文字列が現れた位置までを捨て、それより後ろだけを残します（マーカー自体は残りません）。
+              「最初」なら文字列中で最初に見つかった位置、「最後」なら最後に見つかった位置を使います
+              （既定は「最初」。従来と同じ動きです）。
             </p>
             <input
               id="trim-cut-up-to"
@@ -260,29 +340,32 @@ export default function TrimPanel({ rules, onChange, previewSeed, onClose }: Tri
           </div>
 
           <div>
-            <label className="block text-sm font-semibold text-slate-100" htmlFor="trim-cut-from">
-              ここから先を捨てる（cutFrom）
-            </label>
-            <p className="mt-0.5 text-xs leading-snug text-slate-500">
-              指定した文字列が最初に現れた位置以降をすべて捨てます。スペースや制御文字などの区切り文字を指定するのに使います。
-            </p>
-            <div className="mt-2 flex items-center gap-2">
-              <input
-                id="trim-cut-from"
-                type="text"
-                className={inputClass}
-                value={cutFromText}
-                onChange={(e) => handleCutFromChange(e.target.value)}
-                placeholder="例: (スペース) や \x1D"
+            <div className="flex items-center justify-between gap-2">
+              <label className="block text-sm font-semibold text-slate-100" htmlFor="trim-cut-from">
+                ここから先を捨てる（cutFrom）
+              </label>
+              <FirstLastSegment
+                label="cutFrom の探索位置"
+                useLast={rules.cutFromLast}
+                onChange={(useLast) => pushRules({ cutFromLast: useLast })}
               />
-              <button
-                type="button"
-                onClick={applyGsPreset}
-                className="shrink-0 rounded-lg bg-slate-800 px-3 py-2 text-xs font-semibold text-cyan-200 active:bg-slate-700"
-              >
-                GS(0x1D)以降を削除
-              </button>
             </div>
+            <p className="mt-0.5 text-xs leading-snug text-slate-500">
+              指定した文字列が現れた位置以降をすべて捨てます。スペースや制御文字などの区切り文字を指定するのに使います。
+              <strong className="text-slate-100">
+                {' '}
+                `*abc*` のように前後を同じ文字列で囲んでいる場合は、「最後」を選んでください
+              </strong>
+              （「最初」のままだと先頭の区切り文字自体で切れてしまい、結果が空になります）。
+            </p>
+            <input
+              id="trim-cut-from"
+              type="text"
+              className={`${inputClass} mt-2`}
+              value={cutFromText}
+              onChange={(e) => handleCutFromChange(e.target.value)}
+              placeholder="例: (スペース) や \x1D"
+            />
           </div>
 
           <p className="text-xs leading-snug text-slate-500">

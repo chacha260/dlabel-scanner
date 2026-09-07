@@ -247,8 +247,8 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
           </p>
           <p>設定できるルールは次の5種類で、この順番でまとめて適用されます。</p>
           <ul className="list-disc space-y-1.5 pl-5">
-            <li>指定した文字列が最初に現れた位置までを捨てる（それより後ろを残す）</li>
-            <li>指定した文字列が最初に現れた位置以降をすべて捨てる（スペースなどの区切り文字を指定するのに便利）</li>
+            <li>指定した文字列が現れた位置までを捨てる（それより後ろを残す。「ここまでを捨てる」）</li>
+            <li>指定した文字列が現れた位置以降をすべて捨てる（スペースなどの区切り文字を指定するのに便利。「ここから先を捨てる」）</li>
             <li>前方一致する接頭辞を取り除く（複数指定できます）</li>
             <li>後方一致する接尾辞を取り除く（複数指定できます）</li>
             <li>最後に前後の空白を除去する</li>
@@ -257,6 +257,31 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             パネルを開いた状態ではバーコードの自動読み取りは止まり、上部の
             <strong className="text-slate-100">プレビュー欄</strong>
             で今のルールを適用した結果をその場で確認できます（一覧にある直近の読み取り値が、バーコード・OCRどちらの結果でも初期値として入ります）。
+          </p>
+          <p>
+            <strong className="text-slate-100">「ここまでを捨てる」「ここから先を捨てる」は、それぞれ</strong>
+            <ButtonRef>最初</ButtonRef>
+            <ButtonRef>最後</ButtonRef>
+            の小さな切り替えを持っています。指定した文字列が値の中に複数回現れるとき、
+            <strong className="text-slate-100">どちらの出現位置を使うか</strong>
+            を選べます。既定はどちらも
+            <ButtonRef>最初</ButtonRef>
+            （これまでと同じ動き）です。
+          </p>
+          <p>
+            例えば <span className="font-mono text-slate-100">*abcdefg*</span>{' '}
+            のように、前置きと後置きが<strong className="text-slate-100">同じ文字列で囲まれている</strong>
+            場合、「ここまでを捨てる」を<ButtonRef>最初</ButtonRef>
+            のまま・「ここから先を捨てる」を<ButtonRef>最後</ButtonRef>
+            に切り替えると、囲みの外側2つの
+            <span className="mx-1 font-mono text-slate-100">*</span>
+            だけを剥がして中身の
+            <span className="mx-1 font-mono text-slate-100">abcdefg</span>
+            を取り出せます（どちらも<ButtonRef>最初</ButtonRef>
+            のままだと、同じ文字が区切りにも中身にも使われている場合に、狙った位置で切れないことがあります）。
+            この組み合わせは
+            <ButtonRef tone="primary">*などで囲まれた中身を取り出す</ButtonRef>
+            ボタンを押すだけで一括設定できます（区切り文字自体は現場のラベルに合わせて入力してください）。
           </p>
           <p>
             <strong className="text-slate-100">
