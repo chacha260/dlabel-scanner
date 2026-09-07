@@ -1452,8 +1452,53 @@ export function SimpleScanScreen() {
         )}
       </div>
 
-      {/* コントロール */}
-      <div className="flex shrink-0 flex-col gap-2 border-b border-slate-800 bg-slate-900 p-3">
+      {/* コントロール（設定・バナー・結果カード）: 独立スクロール領域。
+          以前はここ全体が1つの `shrink-0` コンテナで、overflow の指定も
+          無かった。そのため中身（特にOCR結果カード）が想定より高くなると、
+          画面全体（`flex h-full flex-col`）の中でこのコンテナだけが伸び続け、
+          その下の結果一覧・フッターを画面外へ押し出し、しかも押し出された先は
+          スクロール領域ではないため二度と触れなくなる、という実機バグが起きた。
+
+          最初の修正では「シャッター行をこのコンテナの中に残したまま、
+          コンテナ自体は `shrink-0` のまま `max-h-[32vh]` の上限だけ足す」形に
+          したが、これは不十分だった。ルートの子（この画面全体）のうち
+          結果一覧（`min-h-0 flex-1`）以外は全部 `shrink-0` で、`shrink-0` は
+          「余っても伸びないが、足りなくても縮まない」という意味である。
+          画面高さを H とすると、`shrink-0` な部分（上部バー約80px＋共通設定バー
+          約48px＋カメラプレビュー `0.42H`＋コントロール最大`0.32H`＋シャッター行
+          約80px＋フッター約68px）の合計は `276 + 0.74H` で、これが H を超えない
+          条件は H ≧ 1062px（CSS px）しかない。実機は 3264px物理 / DPR約2.75 ≒
+          1187 CSS px でぎりぎり足りていたが、そのとき結果一覧は実質0pxになり
+         （読み取った値が1件も見えない）、これより背の低い端末では今度は
+          シャッターやフッターがまた画面外へ押し出される。`max-h` は「中身が
+          少ないときに広がりすぎない上限」でしかなく、**「足りないときに縮む」
+          ことは別途保証しないと、`shrink-0` を積み上げた時点で足し算が
+          破綻する**、というのがこの再発の教訓である。
+
+          そこで構造を次のように直した。
+          1. シャッター行はこのコンテナの外へ出し、ルート直下の兄弟（`shrink-0`）
+             にした（すぐ下を参照）。これによりシャッター行の高さは上の計算の
+             「常に確保される固定分」に含まれ、コントロール側がどれだけ縮んでも
+             視覚的に切れることがない。
+          2. このコンテナ自身は `shrink-0` を外し、`min-h-0` を付けて縮められる
+             ようにした（`max-h-[28vh]` は上限のみを規定し、下限は規定しない）。
+             画面が狭いときはこのコンテナが真っ先に縮み、内部は
+             `overflow-y-auto overscroll-contain` でスクロールして中身を見せる。
+          3. 結果一覧（下）に `min-h-[4.5rem]`（約2行ぶん）を与え、どれだけ
+             コントロールが伸びても「読み取った値が1件も見えない」状態には
+             ならないようにした。
+
+          この構造での「画面に必ず収まる条件」を検算する。縮まない
+          （`shrink-0`、または明示した最小値を持つ）部分だけを固定分として足すと:
+            上部バー(約80px) + 共通設定バー(約48px) + カメラプレビュー(0.42H)
+            + シャッター行(約80px) + フッター(約68px) + 結果一覧の最小高さ(約72px)
+            = 348 + 0.42H
+          コントロール自身は縮んで0になり得るので計算に入れない（その代わり
+          スクロールで中身へアクセスできる）。348 + 0.42H ≦ H を解くと
+          0.58H ≧ 348 → H ≧ 約600px となり、現実のどのスマートフォンでも
+          成立する（この 600px という数字、もしくは上の各定数を変えるときは、
+          この式を書き直して両辺の関係が保たれることを必ず確認すること）。 */}
+      <div className="flex min-h-0 max-h-[28vh] flex-col gap-2 overflow-y-auto overscroll-contain border-b border-slate-800 bg-slate-900 p-3">
         {/* ブラウザ（pnpm dev / GitHub Pages）向けの案内。
             以前は「ML Kitが使えないため文字モードは使えない」という禁止の警告
             だったが、PaddleOCR（onnxruntime-web・WASM）をフォールバックとして
@@ -1486,14 +1531,25 @@ export function SimpleScanScreen() {
             直後にその場で切り替える「精密読み取り」ボタンはここに残っている。 */}
         {mode === 'ocr' && !ocrBusy && capturedImage && ocrInfo && (
           <div className="flex flex-col gap-2 rounded-lg bg-slate-800 p-2.5">
-            <div className="flex flex-wrap items-center gap-2">
+            {/* 1段目: サムネイルとテキストだけの行。以前はこの行に操作ボタンも
+                並べていたが、「同じ画像で再認識」「精密読み取り」「設定を比較」
+                「×」が全部揃うとボタン側の合計幅（shrink-0）だけで実機の画面幅
+                を超えてしまい、隣の `flex-1 min-w-0` のテキスト列が「潰れて
+                残る」ことを選んだ結果、幅ゼロ近くまで押し潰されて1文字ずつ縦に
+                並ぶ崩れ方をしていた（`flex-wrap` はテキスト列自身の折り返しは
+                助けてくれない）。ボタンをこの行から追い出し、テキスト列の隣に
+                shrink-0 の兄弟を置かないことで、この行は絶対に潰れない。 */}
+            <div className="flex items-center gap-2">
               <div className="shrink-0 overflow-hidden rounded border border-slate-700 bg-black">
                 <CapturedImageCanvas image={capturedImage} className="h-12 w-28 object-contain" />
               </div>
               <div className="min-w-0 flex-1">
-                <p className="text-[10px] text-slate-500">
-                  読み取った画像{ocrInfo.engine === 'paddle' && '（PaddleOCRで読みました）'}
-                </p>
+                {/* 以前は「読み取った画像（PaddleOCRで読みました）」とエンジン名を
+                    ここにも書いていたが、すぐ下の行に「PaddleOCR / 202ms / 信頼度 99%」
+                    と同じ情報が出ているため単なる重複であり、行を無駄に長くして
+                    上の崩れを悪化させるだけだった。ラベルは元の「読み取った画像」に
+                    戻し、エンジン名は下の行に一本化する。 */}
+                <p className="text-[10px] text-slate-500">読み取った画像</p>
                 {/* confidence の意味はエンジンで違う（types.ts の OcrResult.confidence参照）。
                     ML Kit は文字ごと・全体としての信頼度スコアを一切返さず、常に0が入るため、
                     そのまま「信頼度 0%」と出すと「まったく読めていない」という逆の誤解を
@@ -1509,6 +1565,16 @@ export function SimpleScanScreen() {
                   <p className="truncate text-[10px] text-slate-500">（ML Kitは信頼度を返しません）</p>
                 )}
               </div>
+            </div>
+
+            {/* 2段目: 操作ボタン群。テキストと同じ行に置かず `flex-wrap` だけで
+                並べているため、画面が狭くて全部は入りきらないときは
+                「テキストが潰れる」のではなく「ボタンが折り返される」側に倒れる
+                （日本語ラベルが長い「同じ画像で再認識」でも同様）。
+                × （閉じる）だけは押し間違い防止のため `ml-auto` で右端に離し、
+                他の操作ボタンから独立させている（見た目はこれまで通りアイコン
+                のみ・小さめのまま）。 */}
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={handleRetrySameImage}
@@ -1545,7 +1611,7 @@ export function SimpleScanScreen() {
                 type="button"
                 onClick={handleDismissCapturedImage}
                 aria-label="読み取り結果を閉じる"
-                className="shrink-0 rounded-full p-1 text-slate-400 active:bg-slate-700"
+                className="ml-auto shrink-0 rounded-full p-1 text-slate-400 active:bg-slate-700"
               >
                 <CloseIcon className="h-4 w-4" />
               </button>
@@ -1720,8 +1786,15 @@ export function SimpleScanScreen() {
             </p>
           </div>
         )}
+        </div>
 
-        <div className="flex items-center gap-2">
+      {/* シャッター行。ルート直下の兄弟（`shrink-0`）として上のコントロール
+          スクロール領域の外に出してある。コントロール側が `min-h-0` で縮む
+          構造になった以上、シャッターは「縮まない別の要素」として独立させて
+          おかないと、コントロールと一緒に潰れて見えなくなる／逆にコントロール
+          側が伸びたときに画面外へ押し出される、のどちらの事故も起き得る
+         （検算は上のコメントを参照）。 */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-t border-slate-800 bg-slate-900 p-3">
           {mode === 'barcode' && (
             <>
               {/* 「常に読む」モードでは一時停止ボタン、「長押し中だけ」モードでは
@@ -1821,11 +1894,14 @@ export function SimpleScanScreen() {
               {camera.torchOn ? <FlashIcon className="h-5 w-5" /> : <FlashOffIcon className="h-5 w-5" />}
             </button>
           )}
-        </div>
       </div>
 
-      {/* 結果一覧（新しい順） */}
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+      {/* 結果一覧（新しい順）。`min-h-[4.5rem]`（約2行ぶん）は、上のコントロールが
+          `min-h-0` で縮められるようになったことに対応する下限。無いままだと
+          `flex-1`（basis 0）は上が詰まったときに高さ0まで縮み得るため、
+          「読み取った値が1件も見えない」状態になってしまう（この最小高さの
+          根拠となる足し算は、上のコントロールのコメントに書いた検算を参照）。 */}
+      <div className="min-h-[4.5rem] flex-1 overflow-y-auto overscroll-contain">
         {results.length === 0 ? (
           <p className="p-6 text-center text-sm text-slate-500">まだ結果がありません</p>
         ) : (
