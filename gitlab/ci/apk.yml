@@ -15,6 +15,29 @@ apk:
     ANDROID_PLATFORM: "36"
     ANDROID_BUILD_TOOLS: "36.0.0"
   before_script:
+    # android/app/build.gradle の versionCode/versionName 直上のコメントには
+    # 「リリースのたびに必ず versionCode と versionName の両方を上げること」と
+    # 明記されているが、上げ忘れてもビルドは普通に成功してしまう。サイドロードで
+    # 入れ替える運用のため、端末の「設定 → アプリ」で見えるのはバージョン文字列
+    # だけであり、上げ忘れに気付く手段がこれまで何も無かった。GitHub Actions側の
+    # apk.yml に用意した検査と同じ内容をここでも行い、タグ名（例: v1.3.0）から
+    # 先頭の v を除いた文字列と build.gradle の versionName が一致することを
+    # 検査する。Android SDK の取得（約1GB）や Gradle ビルドは合わせて10分以上
+    # かかるため、それらより前のこの時点で検査し、無駄な待ち時間を発生させずに
+    # 落ちるようにする。手動実行時は $CI_COMMIT_TAG が空（タグが存在しない）ため
+    # この検査自体をスキップする。
+    - |
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        TAG_VERSION="${CI_COMMIT_TAG#v}"
+        GRADLE_VERSION=$(grep -oP 'versionName\s+"\K[^"]+' android/app/build.gradle)
+        echo "タグ: $CI_COMMIT_TAG（バージョン部分: $TAG_VERSION）"
+        echo "android/app/build.gradle の versionName: $GRADLE_VERSION"
+        if [ "$TAG_VERSION" != "$GRADLE_VERSION" ]; then
+          echo "タグ '$CI_COMMIT_TAG' と android/app/build.gradle の versionName ('$GRADLE_VERSION') が一致していません。android/app/build.gradle の versionCode と versionName を上げ忘れていないか確認してください。"
+          exit 1
+        fi
+        echo "OK: タグと versionName が一致しています"
+      fi
     # このジョブだけ JDK イメージを使うため、Node と pnpm を個別に用意する
     - apt-get update -qq && apt-get install -y -qq curl unzip git
     - curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y -qq nodejs
@@ -38,6 +61,34 @@ apk:
     - pnpm run build:apk
     - cd android && ./gradlew assembleDebug --no-daemon
     - ls -lh app/build/outputs/apk/debug/*.apk
+    # PaddleOCR（読めないとき用の第2のOCRエンジン）の実体である ONNX モデル2つ・
+    # 文字辞書・ONNX Runtime の wasm/mjs は、`pnpm run build:apk` の中の
+    # `cap sync android` が public/vendor/ から
+    # android/app/src/main/assets/public/vendor/ へコピーする素朴な仕組みだけで
+    # APK に同梱されている。この経路のどこかでファイルが1つでも欠けても、それ
+    # 自体は Gradle のビルドを失敗させない（アセットが足りないだけの APK は
+    # 普通に完成してしまう）ため、ビルドもテストも全部通ったのに実機で
+    # 「精密読み取り」ボタンを押した瞬間だけモデルの取得に失敗する、という
+    # 気付きにくい壊れ方をする。GitHub Actions側の apk.yml に用意した検査と
+    # 同じ内容で、ビルドした APK の中身を実際に検査する。assets/ 配下は
+    # コンパイル済みリソースではなく単純に zip へ格納されるだけの生ファイル
+    # なので、Android SDK 付属の専用ツールは不要で、既に before_script で
+    # 入れている unzip による一覧確認で十分。
+    - |
+      APK_PATH=$(find app/build/outputs/apk/debug -name '*.apk' | head -n 1)
+      REQUIRED_FILES="assets/public/vendor/onnxruntime/ort-wasm-simd-threaded.wasm assets/public/vendor/onnxruntime/ort-wasm-simd-threaded.mjs assets/public/vendor/paddleocr/ppocrv5-mobile-det.onnx assets/public/vendor/paddleocr/ppocrv5-mobile-rec.onnx assets/public/vendor/paddleocr/ppocrv5_dict.txt"
+      LISTING=$(unzip -l "$APK_PATH" | awk '{print $NF}')
+      MISSING=0
+      for f in $REQUIRED_FILES; do
+        if ! echo "$LISTING" | grep -qx "$f"; then
+          echo "APK に $f が含まれていません。PaddleOCR による「精密読み取り」が実機で動作しません（public/vendor/ の同梱漏れ、または cap sync 忘れの可能性があります）"
+          MISSING=1
+        fi
+      done
+      if [ "$MISSING" -eq 1 ]; then
+        exit 1
+      fi
+      echo "OK: PaddleOCR 同梱物5ファイルはすべて含まれています"
   cache:
     key: "android-sdk-$ANDROID_PLATFORM"
     paths:

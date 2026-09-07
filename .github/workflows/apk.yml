@@ -21,6 +21,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # android/app/build.gradle の versionCode/versionName 直上のコメントには
+      # 「リリースのたびに必ず versionCode と versionName の両方を上げること」と
+      # 明記されているが、これはただのコメントであり、上げ忘れてもビルドは
+      # 普通に成功してしまう。サイドロードで入れ替える運用のため、端末の
+      # 「設定 → アプリ」で見えるのはバージョン文字列だけであり、上げ忘れに
+      # 気付く手段がこれまで何も無かった（このルール自体、実際には一度も
+      # 検証されたことがない）。
+      # ここでタグ名（例: v1.3.0）から先頭の v を除いた文字列と、
+      # build.gradle の versionName が一致することを検査し、食い違って
+      # いたら即座に落とす。Android ビルド（Gradle）は10分以上かかるため、
+      # わざわざそれを待たせずに済むよう、checkout 直後のこの時点で検査する。
+      # workflow_dispatch（手動実行）にはタグが存在しないため、この検査自体を
+      # スキップする（github.ref_type がタグ push のときだけ 'tag' になる）。
+      - name: タグ名と versionName の一致を確認
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          GRADLE_VERSION=$(grep -oP 'versionName\s+"\K[^"]+' android/app/build.gradle)
+          echo "タグ: $GITHUB_REF_NAME（バージョン部分: $TAG_VERSION）"
+          echo "android/app/build.gradle の versionName: $GRADLE_VERSION"
+          if [ "$TAG_VERSION" != "$GRADLE_VERSION" ]; then
+            echo "::error::タグ '$GITHUB_REF_NAME' と android/app/build.gradle の versionName ('$GRADLE_VERSION') が一致していません。android/app/build.gradle の versionCode と versionName を上げ忘れていないか確認してください。"
+            exit 1
+          fi
+          echo "OK: タグと versionName が一致しています"
+
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
@@ -83,10 +110,61 @@ jobs:
           fi
           echo "OK: INTERNET 権限は含まれていません"
 
+      # PaddleOCR（読めないとき用の第2のOCRエンジン）の実体である ONNX モデル2つ・
+      # 文字辞書・ONNX Runtime の wasm/mjs は、`pnpm run build:apk` の中の
+      # `cap sync android` が public/vendor/ から android/app/src/main/assets/public/vendor/
+      # へコピーする素朴な仕組みだけで APK に同梱されている。この経路のどこかで
+      # ファイルが1つでも欠けても、それ自体は Gradle のビルドを失敗させない
+      # （アセットが足りないだけの APK は普通に完成してしまう）。
+      # その結果、ビルドもテストも全部緑のまま、実機で「精密読み取り」ボタンを
+      # 押した瞬間だけモデルの取得に失敗して機能が動かない、という極めて
+      # 気付きにくい壊れ方をする。
+      # 「INTERNET 権限が含まれていないことを確認」ステップと同じ発想で、ここでも
+      # ビルドした APK の中身を実際に検査し、欠けていたらビルドを落とす。
+      # assets/ 配下はコンパイル済みリソースではなく単純に zip へ格納される
+      # だけの生ファイルなので、aapt2 のような専用ツールは不要で、軽量な
+      # unzip -l によるファイル一覧の確認で十分。
+      - name: PaddleOCR 同梱物が APK に含まれていることを確認
+        run: |
+          set -euo pipefail
+          REQUIRED_FILES=(
+            "assets/public/vendor/onnxruntime/ort-wasm-simd-threaded.wasm"
+            "assets/public/vendor/onnxruntime/ort-wasm-simd-threaded.mjs"
+            "assets/public/vendor/paddleocr/ppocrv5-mobile-det.onnx"
+            "assets/public/vendor/paddleocr/ppocrv5-mobile-rec.onnx"
+            "assets/public/vendor/paddleocr/ppocrv5_dict.txt"
+          )
+          LISTING=$(unzip -l "${{ steps.apk.outputs.path }}" | awk '{print $NF}')
+          echo "--- APK 内の vendor/ 一覧 ---"
+          echo "$LISTING" | grep '/vendor/' || true
+          MISSING=0
+          for f in "${REQUIRED_FILES[@]}"; do
+            if ! echo "$LISTING" | grep -qx "$f"; then
+              echo "::error::APK に $f が含まれていません。PaddleOCR による「精密読み取り」が実機で動作しません（public/vendor/ の同梱漏れ、または cap sync 忘れの可能性があります）"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -eq 1 ]; then
+            exit 1
+          fi
+          echo "OK: PaddleOCR 同梱物5ファイルはすべて含まれています"
+
       - name: APK サイズをジョブサマリーに表示
         run: |
+          set -euo pipefail
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -n 1)
+          if [ -z "$AAPT2" ]; then
+            echo "::error::aapt2 が見つからず、バージョン情報の取得ができませんでした"
+            exit 1
+          fi
+          # サイドロードで入れ替える運用のため、端末の「設定 → アプリ」以外に
+          # 版数を確認する手段が乏しい。このジョブサマリーを見るだけで、
+          # 今回ビルドされた APK が android/app/build.gradle のどの
+          # versionCode / versionName に対応するものかを判別できるようにする。
+          VERSION_LINE=$("$AAPT2" dump badging "${{ steps.apk.outputs.path }}" | grep '^package:')
           echo "### APK 情報" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$VERSION_LINE" >> "$GITHUB_STEP_SUMMARY"
           ls -lh "${{ steps.apk.outputs.path }}" >> "$GITHUB_STEP_SUMMARY"
           du -h "${{ steps.apk.outputs.path }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

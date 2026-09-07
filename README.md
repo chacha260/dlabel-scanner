@@ -257,6 +257,10 @@ pnpm lint       # oxlint
 Android APK 化したビルドも用意しています（`android/` ディレクトリ、
 `pnpm build:apk`、`.github/workflows/apk.yml`）。ビルド方法・インストール方法・
 実機で確認すべき事項は [`docs/apk.md`](docs/apk.md) を参照してください。
+タグ push（`vX.Y.Z`）でリリースする際の手順と、CI が検査するゲート
+（タグ名と `versionName` の一致、PaddleOCR 同梱物の有無など）については
+[`docs/apk.md`](docs/apk.md) の「タグ push でリリースする場合の手順」を
+参照してください。
 
 ## GitLab で運用する場合
 
