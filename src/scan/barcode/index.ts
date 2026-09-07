@@ -5,10 +5,28 @@ import type { BarcodeHit, BarcodeInput, BarcodeReader } from './types'
 import { createNativeReader, isNativeAvailable } from './native'
 import { createZxingReaderCore, type ZxingReaderCore } from './zxingReaderCore'
 
-export type { BarcodeHit, BarcodeInput, BarcodeReader, NormalizedRect } from './types'
+export type { BarcodeHit, BarcodeInput, BarcodeReader, NormalizedRect, SupportedFormat } from './types'
 export { SUPPORTED_FORMATS } from './types'
 export { selectNewHits } from './dedupe'
 export { filterHitsByRoi, isHitInRoi } from './roiFilter'
+// 誤読ガード（詳細は guards.ts 冒頭のコメント参照）。native / zxing どちらの経路の
+// 結果にも同じ検証をかけるための唯一の場所であり、useBarcodeScanner.ts から使う。
+export {
+  BARCODE_FORMAT_LABELS,
+  DEFAULT_BARCODE_GUARD_RULES,
+  describeBarcodeGuardReason,
+  evaluateBarcodeHit,
+  isBoxTruncated,
+  isGtinCheckApplicable,
+  isTwoDimensionalFormat,
+  verifyCode39CheckDigit,
+  verifyGtinCheckDigit,
+  type BarcodeGuardReason,
+  type BarcodeGuardResult,
+  type BarcodeGuardRules,
+} from './guards'
+// 複数回一致トラッカー（詳細は agreement.ts 冒頭のコメント参照）
+export { createBarcodeAgreementTracker, DEFAULT_AGREEMENT_WINDOW_MS, type BarcodeAgreementTracker } from './agreement'
 
 export type BarcodeBackend = 'native' | 'zxing'
 

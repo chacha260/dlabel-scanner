@@ -28,11 +28,28 @@
 // 「切り出したcanvas自身」基準のクロップ座標になるため、映像座標のROIフィルタ
 // （filterHitsByRoi）を重ねて適用してはいけない（座標系混同で正しいヒットを
 // 静かに弾いてしまう）。詳細な理由は crop.ts の resolveBarcodeCropPlan を参照。
+//
+// 誤読ガードについて（重要、barcode/guards.ts・barcode/agreement.ts も参照）:
+// 「バーコードが切れている等の際にまったく違う値が入る」という現場報告への対処として、
+// filterHitsByRoi の後・selectNewHits の前に検証層を挟んである（下の handleHits 参照）。
+// native.ts（APK版で実際に使われる主経路）は formats 以外の内部挙動を一切設定できない
+// ため、ガードの主役は「デコード後の検証結果」を見るこの検証層であり、native / zxing
+// どちらの経路の結果にも同じ関数を通す。チェックディジット・見切れ・桁数はヒット1件
+// だけで判定できる純粋関数（guards.ts）、複数回一致はフレームをまたいだ状態を持つ
+// トラッカー（agreement.ts）に分離してある。
 
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 import type { RawScan } from '../parse/types'
-import { createBarcodeReader, filterHitsByRoi, selectNewHits } from './barcode'
-import type { BarcodeBackend, BarcodeHit, BarcodeReader, NormalizedRect } from './barcode'
+import {
+  createBarcodeAgreementTracker,
+  createBarcodeReader,
+  DEFAULT_AGREEMENT_WINDOW_MS,
+  DEFAULT_BARCODE_GUARD_RULES,
+  evaluateBarcodeHit,
+  filterHitsByRoi,
+  selectNewHits,
+} from './barcode'
+import type { BarcodeAgreementTracker, BarcodeBackend, BarcodeGuardReason, BarcodeGuardRules, BarcodeHit, BarcodeReader, NormalizedRect } from './barcode'
 import { computeCropSize, CROP_PIXEL_BUDGET_PX, resolveBarcodeCropPlan } from './barcode/crop'
 import { computeDownscaledSize } from './barcode/scale'
 // ROI の表示座標→映像座標への変換は geometry.ts の1箇所だけに閉じ込める
@@ -89,6 +106,20 @@ export type UseBarcodeScannerOptions = {
    * 「読み取り済み」などの軽いフィードバック表示にだけ使うことを想定している。
    */
   onDuplicate?: (hit: BarcodeHit) => void
+  /**
+   * 誤読ガードのルール（barcode/guards.ts 参照。省略時は DEFAULT_BARCODE_GUARD_RULES）。
+   * roi・restrictToRoi と同様 ref 経由で読むため、設定を変えるたびにフレームループが
+   * 張り直されることはない。
+   */
+  guardRules?: BarcodeGuardRules
+  /**
+   * 誤読ガード（チェックディジット・見切れ・桁数・許可シンボロジー）に引っかかって
+   * 棄却されたヒットの通知。一覧には追加されない（onScan は呼ばれない）。
+   * 「複数回一致がまだ規定回数に満たない」だけの状態はここでは棄却として扱わない
+   * （次のフレームで採用されうるだけで、異常でも何でもないため呼ばれない）。
+   * onDuplicate と同様、同じ値・同じ理由について dedupeMs 経過するまで連打しない。
+   */
+  onReject?: (hit: BarcodeHit, reason: BarcodeGuardReason) => void
   onScan: (scan: RawScan) => void
 }
 
@@ -203,6 +234,8 @@ export function useBarcodeScanner({
   restrictToRoi = false,
   isDuplicate,
   onDuplicate,
+  guardRules = DEFAULT_BARCODE_GUARD_RULES,
+  onReject,
   onScan,
 }: UseBarcodeScannerOptions): UseBarcodeScannerResult {
   const [backend, setBackend] = useState<BarcodeBackend | null>(null)
@@ -224,6 +257,32 @@ export function useBarcodeScanner({
     isDuplicateRef.current = isDuplicate
     onDuplicateRef.current = onDuplicate
   }, [isDuplicate, onDuplicate])
+
+  // 誤読ガードのルール・棄却通知も同じ理由（設定を変えるたびにフレームループを
+  // 張り直したくない）で ref 経由で読む。
+  const guardRulesRef = useRef(guardRules)
+  const onRejectRef = useRef(onReject)
+  useEffect(() => {
+    guardRulesRef.current = guardRules
+    onRejectRef.current = onReject
+  }, [guardRules, onReject])
+
+  // 複数回一致トラッカー（barcode/agreement.ts）。フレームをまたいだ観測回数という
+  // 状態そのものが「今このフックが張っているフレームループの生存期間」に紐づく
+  // ものなので、useRef で1個だけ生成してフックのライフサイクル全体で使い回す
+  // （roi等と違い、途中で作り直す理由が無い）。関数コンポーネントは毎レンダー
+  // 実行されるため、useRef(createBarcodeAgreementTracker()) と書くと引数の式が
+  // 毎回評価されて無駄なオブジェクトを作ってしまう。ここでは null 初期化＋
+  // 初回だけ生成する形にして、その無駄を避ける（この manual lazy init は
+  // React 公式にも載っている定石）。
+  const agreementTrackerRef = useRef<BarcodeAgreementTracker | null>(null)
+  if (agreementTrackerRef.current === null) {
+    agreementTrackerRef.current = createBarcodeAgreementTracker()
+  }
+  // 誤読ガードで棄却した通知（onReject）の連打防止用。onDuplicate 側の
+  // lastDuplicateNotifyRef と同じ考え方で、同じ値・同じ理由については
+  // dedupeMs 経過するまで再度は呼ばない。
+  const lastRejectNotifyRef = useRef<Map<string, number>>(new Map())
 
   // ビープ / バイブの ON-OFF は ref 経由で読む。
   // 依存配列に入れるとトグルのたびにフレームループが張り直しになるため。
@@ -379,12 +438,53 @@ export function useBarcodeScanner({
       const candidates = roiFilterTarget ? filterHitsByRoi(hits, roiFilterTarget) : hits
       if (candidates.length === 0) return
 
+      const nowMs = Date.now()
+
+      // 誤読ガード層（barcode/guards.ts）。filterHitsByRoi の後・selectNewHits の前に
+      // 挟む理由: ROI で「見る範囲」を絞った後・「一覧に追加すべきか」を判定する前の、
+      // 「そもそもこの読み取り結果を信用してよいか」を判定する層として独立させたいため
+      // （ROI絞り込みや重複判定と混ぜると、どちらの理由で除外されたのか追えなくなる）。
+      // native.ts（APK版の主経路）・zxing.worker.ts（フォールバック）のどちらの結果でも
+      // 必ずこの同じ関数を通すことで、経路によらず同じ誤読ガードが効く
+      // （guards.ts 冒頭のコメント「なぜデコード後の検証層が本命か」を参照）。
+      const rules = guardRulesRef.current
+      const guardPassed: BarcodeHit[] = []
+      for (const hit of candidates) {
+        const verdict = evaluateBarcodeHit(hit, rules)
+        if (!verdict.ok) {
+          // 棄却は黙って捨てない。ただし毎フレーム同じ理由で通知が連打されないよう、
+          // onDuplicate と同じ考え方（値ごとの直近通知時刻）で時間窓による抑制をかける。
+          // 理由ごとに文言が変わりうるため、キーには理由の種類も含める。
+          const key = `${hit.value} ${verdict.reason.type}`
+          const lastNotified = lastRejectNotifyRef.current.get(key)
+          if (lastNotified === undefined || nowMs - lastNotified >= dedupeMs) {
+            lastRejectNotifyRef.current.set(key, nowMs)
+            onRejectRef.current?.(hit, verdict.reason)
+          }
+          continue
+        }
+        // 複数回一致（barcode/agreement.ts）。「まだ規定回数に満たない」は棄却ではない
+        // （次のフレームで規定回数に達すれば採用されうるだけ）ため、ここでは何も
+        // 通知せずに静かに次のフレームへ持ち越す。1次元シンボルだけに効き、2次元
+        // シンボルは常にそのまま素通りする（agreement.ts 参照）。
+        guardPassed.push(hit)
+      }
+      // 複数回一致は「1フレーム内の同じ値の重複」を1カウントとして扱う必要があるため
+      // （agreement.ts の observeFrame コメント参照）、ヒットごとに呼ぶのではなく
+      // このフレーム分の guardPassed をまとめて1回で渡す。
+      const agreementPassed = agreementTrackerRef.current!.observeFrame(
+        guardPassed,
+        nowMs,
+        rules.requiredAgreementCount,
+        DEFAULT_AGREEMENT_WINDOW_MS,
+      )
+      if (agreementPassed.length === 0) return
+
       // 追加の可否は「今その値が呼び出し側の結果一覧に既にあるか」だけで決める
       // （isDuplicate 未指定時は常に false ＝一覧の状態によらず全て新規扱い）。
       // 時間はここでは一切関係ない。
       const isDuplicate = isDuplicateRef.current ?? (() => false)
-      const newHits = selectNewHits(candidates, isDuplicate)
-      const nowMs = Date.now()
+      const newHits = selectNewHits(agreementPassed, isDuplicate)
 
       // 追加はされなかったが、その理由が「一覧に既にある」ことであるヒットにだけ、
       // 「読み取り済み」の合図を出す。連打防止のため、同じ値については
@@ -392,7 +492,7 @@ export function useBarcodeScanner({
       // 光らせるとうるさいだけで、追加の可否にはそもそも関与しない）。
       // ビープ/バイブと同様、フレームにつき通知は最大1回に留める。
       const addedValues = new Set(newHits.map((h) => h.value))
-      for (const hit of candidates) {
+      for (const hit of agreementPassed) {
         if (addedValues.has(hit.value) || !isDuplicate(hit.value)) continue
         const lastNotified = lastDuplicateNotifyRef.current.get(hit.value)
         if (lastNotified !== undefined && nowMs - lastNotified < dedupeMs) continue
@@ -403,6 +503,13 @@ export function useBarcodeScanner({
 
       if (newHits.length === 0) return
       setLastHit(newHits[newHits.length - 1])
+
+      // 一覧へ実際に新規追加する値は、複数回一致のカウンタを破棄する（agreement.ts の
+      // forget のコメントに書いた設計判断: 「一度信用した値をずっと信用し続ける」のではなく
+      // 「毎回やり直す」方式を採用しているため）。
+      for (const hit of newHits) {
+        agreementTrackerRef.current!.forget(hit.format, hit.value)
+      }
 
       // ビープ/バイブは「このフレームで新規ヒットが1件以上あったか」でのみ判定する。
       // ヒット件数ぶん鳴らすとバーストになるため、フレームにつき最大1回に留める。

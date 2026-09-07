@@ -25,7 +25,9 @@ import { useBarcodeScanner } from '../scan/useBarcodeScanner'
 import { isAnyOverlayOpen, isBarcodeScanEnabled, type BarcodeTriggerMode, type ScanMode } from '../scan/scanGating'
 import { applyTrimRules, DEFAULT_TRIM_RULES, visualizeControlChars, type TrimRules } from '../scan/barcode/trim'
 import { truncateForDisplay } from '../scan/barcode/truncate'
+import { describeBarcodeGuardReason, type BarcodeGuardReason, type BarcodeGuardRules, type BarcodeHit } from '../scan/barcode'
 import {
+  loadBarcodeGuardRules,
   loadBarcodeTriggerMode,
   loadCaptureQuality,
   loadHelpSeen,
@@ -38,6 +40,7 @@ import {
   loadTrimRules,
   loadZoom,
   markHelpSeen,
+  saveBarcodeGuardRules,
   saveBarcodeTriggerMode,
   saveCaptureQuality,
   saveOcrEngine,
@@ -89,6 +92,11 @@ const HelpSheet = lazy(() => import('./HelpSheet'))
 // ボタンを押すまでは読み込まれない。バーコード・OCR共通のルールを編集するパネル
 // なので、モードを問わずここから開く）。
 const TrimPanel = lazy(() => import('./TrimPanel'))
+
+// 誤読ガード設定パネルも同じ理由で別チャンクにする（バーコードモード固有ブロックの
+// 「誤読ガード」ボタンを押すまでは読み込まれない。TrimPanel と同様、設定項目が
+// 多く共通設定バーには並べられないため専用パネルにしてある）。
+const BarcodeGuardPanel = lazy(() => import('./BarcodeGuardPanel'))
 
 // ライセンス情報パネルも別チャンクにする。同梱しているライセンス本文全文
 // （src/licenses/generated.ts、100KB超）を抱えているため、これをエントリー
@@ -471,6 +479,30 @@ export function SimpleScanScreen() {
   const handleOpenTrimPanel = useCallback(() => setTrimPanelOpen(true), [])
   const handleCloseTrimPanel = useCallback(() => setTrimPanelOpen(false), [])
 
+  // バーコードの誤読ガード設定（scan/barcode/guards.ts）。前回設定していた内容を
+  // 次回起動時も復元する。整形ルールと違い useBarcodeScanner 側に直接渡す設定
+  // （フレームループが ref 経由で読む）なので、こちら側で ref を持つ必要はない。
+  const [barcodeGuardRules, setBarcodeGuardRules] = useState<BarcodeGuardRules>(loadBarcodeGuardRules)
+  const handleChangeBarcodeGuardRules = useCallback((next: BarcodeGuardRules) => {
+    setBarcodeGuardRules(next)
+    saveBarcodeGuardRules(next)
+  }, [])
+
+  // 誤読ガードパネル。TrimPanel と同様、全画面でカメラが見えなくなるため
+  // isAnyOverlayOpen 経由でバーコード検出を止める（下の overlaysOpen を参照）。
+  const [guardPanelOpen, setGuardPanelOpen] = useState(false)
+  const handleOpenGuardPanel = useCallback(() => setGuardPanelOpen(true), [])
+  const handleCloseGuardPanel = useCallback(() => setGuardPanelOpen(false), [])
+
+  // 誤読ガードで棄却されたヒットの通知。既存の showToast で短く出す。
+  // 現場の人が次に何をすればよいか分かる文言は describeBarcodeGuardReason
+  // （guards.ts）に集約してあり、ここでは呼ぶだけにする（トーストとヘルプ文言とで
+  // 表現がずれないようにするため）。連打防止は useBarcodeScanner 側（dedupeMs）が
+  // 既に行っているため、ここでは受け取ったら毎回そのまま出すだけでよい。
+  const handleRejectHit = useCallback((_hit: BarcodeHit, reason: BarcodeGuardReason) => {
+    showToast(describeBarcodeGuardReason(reason), 'error')
+  }, [])
+
   // 対象はバーコード行のみ。OCR で読んだ文字列がたまたま同じ値でも、
   // バーコードの読み取りを止める理由にはならないため。
   // 重複判定は「整形後の値」で比較する（一覧に残っているのは整形後の値であり、
@@ -756,21 +788,30 @@ export function SimpleScanScreen() {
   }, [mode, ocrBox, barcodeBox])
 
   // この画面に実在するオーバーレイは「OCR結果カード」「使い方パネル」「整形パネル」
-  // 「OCR設定の比較パネル」の4つ（一覧・確認ダイアログ・プロファイル選択などは
-  // この画面には存在しない）。isAnyOverlayOpen は汎用の純粋関数のまま流用し、
-  // 渡すフラグだけを実在するものに絞る。
+  // 「誤読ガード設定パネル」「OCR設定の比較パネル」の5つ（一覧・確認ダイアログ・
+  // プロファイル選択などはこの画面には存在しない）。isAnyOverlayOpen は汎用の純粋関数
+  // のまま流用し、渡すフラグだけを実在するものに絞る。
   // OCR結果カードで止めるのは「認識処理中」だけにする。結果カードはカメラ映像の下に
   // 並ぶだけで視界を塞がないため、表示されている間ずっと検出を止めると
   // 一度 OCR しただけでバーコードが読めなくなってしまう。
-  // 使い方パネル・整形パネル・比較パネルはどれも全画面表示でカメラがどこを向いているか
-  // 分からなくなるため、開いている間は常にバーコード検出を止める。
+  // 使い方パネル・整形パネル・誤読ガードパネル・比較パネルはどれも全画面表示で
+  // カメラがどこを向いているか分からなくなるため、開いている間は常にバーコード検出を止める。
   // 比較パネル（compareOpen）専用のフラグは scanGating.ts（触ってはいけないファイル）に
   // 増やさず、既存の ocrResultPanelOpen（「結果カードで止める」フラグ）に ocrBusy と
   // OR して流し込む。比較パネルは結果カードから開く付随機能であり、意味的には
   // 「結果カードまわりの処理中」の延長として扱って差し支えないため。
+  // 誤読ガードパネル（guardPanelOpen）も同じ理由でフラグを増やさず、TrimPanel と
+  // 「設定項目が多いのでカメラ映像を覆う専用パネルにする」という性質が完全に同じ
+  // trimPanelOpen に OR して流し込む。
   const overlaysOpen = useMemo(
-    () => isAnyOverlayOpen({ ocrResultPanelOpen: ocrBusy || compareOpen, helpOpen, trimPanelOpen, licenseOpen }),
-    [ocrBusy, compareOpen, helpOpen, trimPanelOpen, licenseOpen],
+    () =>
+      isAnyOverlayOpen({
+        ocrResultPanelOpen: ocrBusy || compareOpen,
+        helpOpen,
+        trimPanelOpen: trimPanelOpen || guardPanelOpen,
+        licenseOpen,
+      }),
+    [ocrBusy, compareOpen, helpOpen, trimPanelOpen, guardPanelOpen, licenseOpen],
   )
 
   // バーコード検出を有効にすべきかは isBarcodeScanEnabled（純粋関数）だけで判定する。
@@ -810,6 +851,10 @@ export function SimpleScanScreen() {
     // 常にこの述語（ref 経由）を通じて呼び出し側の最新の状態を尋ねてもらう。
     isDuplicate: isDuplicateValue,
     onDuplicate: handleDuplicateHit,
+    // 誤読ガード（scan/barcode/guards.ts）。ルールは ref 経由で読まれるため、
+    // パネルで設定を変えるたびにフレームループが張り直されることはない。
+    guardRules: barcodeGuardRules,
+    onReject: handleRejectHit,
     onScan: handleScan,
   })
 
@@ -1621,6 +1666,22 @@ export function SimpleScanScreen() {
           </div>
         )}
 
+        {/* 誤読ガード設定への入口（バーコードモード専用）。設定項目が多いため
+            共通設定バーの「整形」と同じ流儀で専用パネルへ切り出してあるが、
+            OCRには関係しない設定なのでバーコードモード固有ブロックに置く。 */}
+        {mode === 'barcode' && (
+          <div className="flex items-center gap-2 text-[11px]">
+            <span className="shrink-0 font-semibold text-slate-400">誤読対策</span>
+            <button
+              type="button"
+              onClick={handleOpenGuardPanel}
+              className="flex min-h-8 flex-1 items-center justify-center rounded-lg bg-slate-800 px-3 text-[11px] font-bold text-slate-200 active:bg-slate-700"
+            >
+              誤読ガードを設定
+            </button>
+          </div>
+        )}
+
         {/* OCRエンジンの選択（文字モード固有。バーコードモードの「読み取り契機」と
             対になる位置に置く）。
             以前はこのSelectが結果カードの中にしか無く、**一度読み取りに成功しないと
@@ -1841,6 +1902,23 @@ export function SimpleScanScreen() {
             onChange={handleChangeTrimRules}
             previewSeed={results[0]?.raw ?? null}
             onClose={handleCloseTrimPanel}
+          />
+        </Suspense>
+      )}
+
+      {/* 誤読ガード設定パネル。別チャンクなので、開くまでは読み込まれない。 */}
+      {guardPanelOpen && (
+        <Suspense
+          fallback={
+            <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950">
+              <SpinnerIcon className="h-8 w-8 text-slate-400" />
+            </div>
+          }
+        >
+          <BarcodeGuardPanel
+            rules={barcodeGuardRules}
+            onChange={handleChangeBarcodeGuardRules}
+            onClose={handleCloseGuardPanel}
           />
         </Suspense>
       )}

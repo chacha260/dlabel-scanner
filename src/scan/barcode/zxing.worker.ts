@@ -140,6 +140,15 @@ async function handleDecode(request: DecodeRequest): Promise<void> {
     const results = await readBarcodes(imageData, {
       formats: ZXING_FORMATS,
       tryHarder: false,
+      // Code39・ITF等、チェックディジットが規格上「任意」のシンボロジーについて、
+      // 付いている場合はzxing-cpp自身にも検証させる（zxing-wasmの既定はfalse）。
+      // 注意: これはあくまでフォールバック経路（BarcodeDetector非対応環境）だけに効く
+      // 保険であり、APK版で実際に使われる主経路（native.ts のネイティブ BarcodeDetector）
+      // には一切効かない。BarcodeDetector は formats 以外の内部挙動を設定できないため
+      // （native.ts 冒頭のコメント参照）、誤読ガードの本命は経路によらず後段で効く
+      // 検証層（barcode/guards.ts の evaluateBarcodeHit）であり、これはその手前で
+      // 追加の網を張っているだけに過ぎない。
+      validateOptionalChecksum: true,
       // 1フレームに大量のバーコードが写り込む病的な入力（例: 小さいQRを
       // 多数印刷したシートをまるごと写す等）で、1回のデコードに際限なく
       // 時間がかかることを防ぐための上限。現品票が縦に複数並ぶ実運用の

@@ -8,6 +8,8 @@ import { DEFAULT_OCR_ENGINE, type OcrEngineId } from '../scan/ocr/types'
 import type { BarcodeTriggerMode, ScanMode } from '../scan/scanGating'
 import { DEFAULT_BARCODE_TRIGGER_MODE } from '../scan/scanGating'
 import { DEFAULT_TRIM_RULES, type TrimRules } from '../scan/barcode/trim'
+import { DEFAULT_BARCODE_GUARD_RULES, type BarcodeGuardRules } from '../scan/barcode/guards'
+import { SUPPORTED_FORMATS, type SupportedFormat } from '../scan/barcode/types'
 
 const SCAN_MODE_STORAGE_KEY = 'dlabel.scanMode'
 
@@ -355,6 +357,83 @@ export function loadTrimRules(): TrimRules {
 export function saveTrimRules(rules: TrimRules): void {
   try {
     localStorage.setItem(TRIM_RULES_STORAGE_KEY, JSON.stringify(rules))
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
+
+const BARCODE_GUARD_RULES_STORAGE_KEY = 'dlabel.barcodeGuardRules'
+
+// バーコード誤読ガード（scan/barcode/guards.ts）の設定。isValidTrimRules と違い、
+// ここでは「保存値の形が丸ごと妥当かどうか」を1回で判定して丸ごと既定値に
+// フォールバックする方式ではなく、フィールドごとに個別にサニタイズしてから
+// 組み立てる方式にしてある。
+//
+// 理由（isValidTrimRules 冒頭のコメントにある教訓をさらに一歩進めたもの）:
+// 「保存値の一部が壊れている・欠けている」ときに全フィールドを既定値へ巻き戻すと、
+// 例えば「有効なシンボロジーだけ丁寧に絞り込んで保存していた」利用者が、
+// 将来のバージョンで別のフィールド（例: 複数回一致の回数）が1つ追加された拍子に、
+// せっかく絞り込んだシンボロジーの設定までまとめてリセットされてしまう。
+// フィールドごとに独立してサニタイズすれば、そのフィールドだけが壊れている・
+// 欠けている場合でも、他の正常なフィールドは保存されていた値のまま生き残る。
+
+/** enabledFormats を検証する。SUPPORTED_FORMATS に含まれる文字列だけを残し、
+ * 1つも残らない場合（＝バーコードが一切読めなくなる壊れた状態）は既定（全許可）に戻す。 */
+function sanitizeEnabledFormats(value: unknown): SupportedFormat[] {
+  if (!Array.isArray(value)) return [...DEFAULT_BARCODE_GUARD_RULES.enabledFormats]
+  const known: readonly string[] = SUPPORTED_FORMATS
+  const filtered = value.filter((v): v is SupportedFormat => typeof v === 'string' && known.includes(v))
+  return filtered.length > 0 ? filtered : [...DEFAULT_BARCODE_GUARD_RULES.enabledFormats]
+}
+
+function sanitizeBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+/** 0以上の有限数だけを許す（桁数の下限・上限は0=無制限という意味を持つため） */
+function sanitizeNonNegativeNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback
+}
+
+/** 複数回一致の回数は1〜3に丸める（UIの選択肢自体もこの範囲だが、保存値の破損や
+ * 手動編集で範囲外の値が入り込むことに備えて、読み込み側でも必ず丸める）。 */
+function sanitizeAgreementCount(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return Math.min(3, Math.max(1, Math.round(value)))
+}
+
+/**
+ * バーコードの誤読ガード設定。保存値が無い場合は DEFAULT_BARCODE_GUARD_RULES を返す。
+ * 保存値がある場合は、上記のとおりフィールドごとに個別のフォールバックを適用して
+ * 組み立てる（一部のフィールドだけが欠けている・型が壊れていても、他のフィールドは
+ * 保存されていた値をそのまま活かす）。
+ */
+export function loadBarcodeGuardRules(): BarcodeGuardRules {
+  try {
+    const raw = localStorage.getItem(BARCODE_GUARD_RULES_STORAGE_KEY)
+    if (raw === null) return DEFAULT_BARCODE_GUARD_RULES
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object') return DEFAULT_BARCODE_GUARD_RULES
+    const v = parsed as Record<string, unknown>
+    return {
+      enabledFormats: sanitizeEnabledFormats(v.enabledFormats),
+      verifyGtinChecksum: sanitizeBoolean(v.verifyGtinChecksum, DEFAULT_BARCODE_GUARD_RULES.verifyGtinChecksum),
+      verifyCode39Checksum: sanitizeBoolean(v.verifyCode39Checksum, DEFAULT_BARCODE_GUARD_RULES.verifyCode39Checksum),
+      rejectTruncatedBox: sanitizeBoolean(v.rejectTruncatedBox, DEFAULT_BARCODE_GUARD_RULES.rejectTruncatedBox),
+      edgeMarginRatio: sanitizeNonNegativeNumber(v.edgeMarginRatio, DEFAULT_BARCODE_GUARD_RULES.edgeMarginRatio),
+      minLength: sanitizeNonNegativeNumber(v.minLength, DEFAULT_BARCODE_GUARD_RULES.minLength),
+      maxLength: sanitizeNonNegativeNumber(v.maxLength, DEFAULT_BARCODE_GUARD_RULES.maxLength),
+      requiredAgreementCount: sanitizeAgreementCount(v.requiredAgreementCount, DEFAULT_BARCODE_GUARD_RULES.requiredAgreementCount),
+    }
+  } catch {
+    // プライベートブラウジング等で読めない・JSON自体が壊れている場合は既定値で動作させる
+    return DEFAULT_BARCODE_GUARD_RULES
+  }
+}
+
+export function saveBarcodeGuardRules(rules: BarcodeGuardRules): void {
+  try {
+    localStorage.setItem(BARCODE_GUARD_RULES_STORAGE_KEY, JSON.stringify(rules))
   } catch {
     // 保存できなくても致命的ではないため無視する
   }
