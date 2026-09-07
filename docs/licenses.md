@@ -103,11 +103,16 @@ pnpm run licenses:check
 以前はここに `public/vendor/tesseract/` 以下（npm の依存解決を経由せず、
 開発者が事前にダウンロードして手動配置していた tesseract.js の
 Web Worker 本体・tesseract.js-core の WebAssembly 本体・Tesseract OCR の
-英語学習済みモデル）の説明があった。tesseract.js を完全に削除し
-`public/vendor/` 自体が無くなったため、この節の内容も現状に合わせて
-書き換えている。
+英語学習済みモデル）の説明があった。tesseract.js を完全に削除した時点で
+`public/vendor/` 自体が無くなり、この節の内容も一度はその旨に書き換えていたが、
+その後 PaddleOCR（読めないとき用の高精度・低速な2つ目のOCRエンジン。
+[README「3.5」](../README.md#35-読めないとき用に-paddleocr-を追加高精度低速)
+を参照）を追加したことで `public/vendor/` は次の構成で復活している。
 
-現在、手書きで補っているのは次の2件です。
+- `public/vendor/paddleocr/`（PP-OCRv5 mobile の検出・認識 ONNX モデル2つ＋文字辞書）
+- `public/vendor/onnxruntime/`（onnxruntime-web の wasm 本体＋JSグルー）
+
+現在、手書きで補っているのは次の3件です。
 
 - **Google ML Kit Text Recognition v2** — npm パッケージではなく、
   Android のネイティブ依存（Gradle の `com.google.mlkit:text-recognition`）
@@ -122,6 +127,20 @@ Web Worker 本体・tesseract.js-core の WebAssembly 本体・Tesseract OCR の
   ビルドしたものです。zxing-wasm 本体のライセンス（MIT）とは別の
   ライセンス（zxing-cpp は Apache-2.0）が適用されるため、区別して
   掲載する必要があります。
+- **PaddleOCR PP-OCRv5 mobile（ONNXモデル・辞書）** — `public/vendor/paddleocr/`
+  以下の検出・認識モデル2つと文字辞書は、開発者が事前にダウンロードして
+  手動配置したものであり、npm の依存ツリーには一切現れません。上流の
+  PaddleOCR 本体と同じ Apache License 2.0 です。**注意点として、PaddleOCR
+  公式（PaddlePaddle）が配布しているのは Paddle 推論形式（`.pdiparams`）で
+  ONNX ではないため、このアプリでは変換済みのものを利用しています。
+  ライセンスこそ上流と整合していますが、入手元は取得時点でダウンロード数が
+  0の個人アカウントでした。** ONNX はデータ形式であり実行コードが混入する
+  性質のものではなく、`onnxruntime-node` で実際にロード・推論して健全性を
+  確認していますが（`scripts/smoke-paddle.mjs` に検証手順と結果を残してある）、
+  広く使われている配布元ではない点は把握しておく必要があります（詳細は
+  README「3.5」の「モデルの出所について」を参照）。onnxruntime-web 本体は
+  npm パッケージとして自動収集の対象になっているため、ここで手書きするのは
+  モデル・辞書のみです。
 
 これらはいずれも `pnpm ls` の依存ツリーには出てこない（=
 `scripts/generate-licenses.mjs` の自動収集では検出できない）にもかかわらず、

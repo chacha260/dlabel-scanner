@@ -16,11 +16,18 @@ import { preprocessRoi, trimBarcodeBoxesToStripes } from './preprocess'
 import type { OcrPreprocessOptions } from './preprocess'
 import { DEFAULT_OCR_PREPROCESS_OPTIONS } from './preprocess'
 import { isMlKitAvailable, recognizeWithMlKit } from './mlkit'
+import { recognizeWithPaddle } from './paddle'
+import { DEFAULT_OCR_ENGINE } from './types'
+import type { OcrEngineId } from './types'
 import type { OcrResult, RoiRect } from './types'
 
-export type { OcrResult, RoiRect } from './types'
+export type { OcrEngineId, OcrResult, RoiRect } from './types'
+export { DEFAULT_OCR_ENGINE } from './types'
 // ML Kit が使えるかどうかの判定だけを通す（実体は mlkit.ts。ブラウザでは常に false）。
 export { isMlKitAvailable } from './mlkit'
+// PaddleOCR（高精度・低速のフォールバック）。モデル一式が約35MBあるので、
+// 読み込みは preparePaddle() を明示的に呼ぶまで遅延される。
+export { disposePaddle, isPaddleReady, preparePaddle } from './paddle'
 export {
   computeOcrScale,
   DEFAULT_OCR_PREPROCESS_OPTIONS,
@@ -215,7 +222,16 @@ export async function captureRoiWithBarcodeMask(
 // 以前あったエンジン振り分け・Web Worker への postMessage・進捗通知の配管は
 // すべて不要になった（ML Kit はネイティブプラグインの呼び出し1回で完結し、
 // 進捗という概念自体を持たない）。
-export async function recognizeCaptured(image: ImageData): Promise<OcrResult> {
+export async function recognizeCaptured(
+  image: ImageData,
+  engine: OcrEngineId = DEFAULT_OCR_ENGINE,
+): Promise<OcrResult> {
+  if (engine === 'paddle') {
+    // PaddleOCR は onnxruntime-web（WASM）で動くため、ネイティブ環境かどうかを
+    // 問わない。ブラウザでもそのまま動く（＝Web版・pnpm dev でも文字モードが使える）。
+    // ML Kit のような環境判定は不要。
+    return recognizeWithPaddle(image)
+  }
   if (!isMlKitAvailable()) {
     // ML Kit は Capacitor のネイティブプラグイン経由でしか動かないため、ブラウザ
     // （pnpm dev や GitHub Pages 等）で呼ばれると本来は成立しない。ここで弾かずに

@@ -4,6 +4,7 @@
 import type { CaptureQuality } from '../camera/quality'
 import type { OcrFilterMode } from '../scan/ocr/postprocess'
 import { DEFAULT_OCR_PREPROCESS_OPTIONS, type OcrPreprocessOptions } from '../scan/ocr/preprocess'
+import { DEFAULT_OCR_ENGINE, type OcrEngineId } from '../scan/ocr/types'
 import type { BarcodeTriggerMode, ScanMode } from '../scan/scanGating'
 import { DEFAULT_BARCODE_TRIGGER_MODE } from '../scan/scanGating'
 import { DEFAULT_TRIM_RULES, type TrimRules } from '../scan/barcode/trim'
@@ -88,6 +89,44 @@ export function saveOcrFilterMode(mode: OcrFilterMode): void {
 // - ocrCareful は「2回目にPSMを変える」実装だったため、PSM自体が無い ML Kit
 //   単独構成では成立しない（前処理を変えた2パスとして作り直すのは別の作業）。
 // - ocrEngine はエンジンが ML Kit の1つだけになったため選択の余地が無い。
+//
+// その後 PaddleOCR（高精度・低速のフォールバック）を追加したことで、再びエンジンを
+// 選ぶ余地ができたため、下の loadOcrEngine/saveOcrEngine として復活させている。
+// ただし位置づけは以前とまったく違う: 以前は「精度がほぼ同じ2エンジンからどちらを
+// 使うか」という選択だったが、今回は「速い既定（ML Kit）を基本にしつつ、常用したい
+// 人だけがここで既定を変えられる」という控えめな設定にすぎない。主役はあくまで
+// 結果カードの「精密読み取り」ボタン（その場でPaddleOCRに読み直す導線）であり、
+// この設定はそれとは別に「毎回PaddleOCRで読みたい」という運用のためのもの。
+const OCR_ENGINE_STORAGE_KEY = 'dlabel.ocrEngine'
+
+/**
+ * 既定で使うOCRエンジン。保存値が無い・壊れている場合は DEFAULT_OCR_ENGINE
+ * （'mlkit'）にフォールバックする。
+ *
+ * 注意: ブラウザ（isMlKitAvailable() が false）では ML Kit がそもそも動かないため、
+ * ここで 'mlkit' が返ってきても、呼び出し側（SimpleScanScreen.tsx）は
+ * isMlKitAvailable() を見て実際に使うエンジンを 'paddle' に読み替える。
+ * ここでは「最後に選ばれていた値」をそのまま返すだけにして、環境判定は
+ * 呼び出し側に一本化する（保存・読み込みの責務と、実行時に使えるかどうかの
+ * 判定の責務を混ぜないため）。
+ */
+export function loadOcrEngine(): OcrEngineId {
+  try {
+    const raw = localStorage.getItem(OCR_ENGINE_STORAGE_KEY)
+    return raw === 'mlkit' || raw === 'paddle' ? raw : DEFAULT_OCR_ENGINE
+  } catch {
+    // プライベートブラウジング等で読めなくても既定値（ML Kit）で動作させる
+    return DEFAULT_OCR_ENGINE
+  }
+}
+
+export function saveOcrEngine(engine: OcrEngineId): void {
+  try {
+    localStorage.setItem(OCR_ENGINE_STORAGE_KEY, engine)
+  } catch {
+    // 保存できなくても致命的ではないため無視する
+  }
+}
 
 const OCR_PREPROCESS_STORAGE_KEY = 'dlabel.ocrPreprocess'
 

@@ -76,22 +76,84 @@ jobs:
           BASE_PATH: ${{ github.event.repository.name == format('{0}.github.io', github.repository_owner) && '/' || format('/{0}/', github.event.repository.name) }}
 
       - name: バンドルサイズを表示
-        # 以前はここに tesseract.js のエンジン一式（public/vendor/tesseract、約9MB）の
-        # サイズも表示していたが、tesseract.js を完全に削除し public/vendor 自体が
-        # 無くなったため削除した（dist/vendor が存在せず du がエラーになる）。
         run: |
           echo "### バンドル構成" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           du -h dist/assets/* dist/index.html 2>/dev/null | sort -h >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "PaddleOCR一式(遅延取得): $(du -sh dist/vendor | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
 
-      # 以前はここに「Service Worker が OCR エンジンをプリキャッシュしていないことを確認」
-      # というゲートがあった（tesseract.js 一式・約9MBが初回インストール時に落ちてきて
-      # 「軽さ」の要件を満たさなくなる回帰を防ぐためのもの）。tesseract.js を完全に
-      # 削除して以降、OCRエンジン（ML Kit）はAndroidアプリのネイティブ側に組み込まれる
-      # ものであり、そもそも Web バンドル・Service Worker のキャッシュ対象になり得ない
-      # （public/vendor 自体が存在しない）。このゲートが守っていた回帰は構造的に
-      # 発生しなくなったため、意味のあるチェックとして書き直すことができず削除した。
+      # PaddleOCR のモデル一式と ONNX Runtime の wasm（dist/vendor 以下、合計約35MB）が
+      # Service Worker の precache に入ると、「アプリを開いた瞬間に35MB落ちてくる」ことに
+      # なり軽さの要件を根本から壊す。特に ort-wasm-simd-threaded.wasm（約14MB）は
+      # vite.config.ts の globPatterns の 'wasm' に該当し、maximumFileSizeToCacheInBytes
+      # にも収まるため、globIgnores の設定を1行消しただけで**静かに**precache へ入る。
+      # ビルド成果物の sw.js を実際に検査して回帰を止める。
+      #
+      # 経緯: tesseract.js を同梱していた頃も同じゲートを置いていた。tesseract 削除で
+      # public/vendor 自体が無くなり一度は外したが、PaddleOCR の追加で事情が元に戻った
+      # ため復活させている。
+      #
+      # 過去の見落とし: 以前はここで「precache のマニフェスト文字列に 'vendor' が
+      # 含まれるか」しか見ていなかった。しかし実際には、onnxruntime-web パッケージ内の
+      # `new URL("ort-wasm-simd-threaded.wasm", import.meta.url)` という記述を Vite が
+      # 静的アセット参照として解決してしまい、dist/vendor とは別に
+      # dist/assets/ort-wasm-simd-threaded-<hash>.wasm という「もう一つの14MB」が
+      # 生成され、それが globIgnores の対象外である assets/ 配下にあるせいで
+      # precache に紛れ込む、という事故が実際に起きていた。文字列 'vendor' の
+      # 有無しか見ないゲートはこの経路を一切検出できない。
+      # そこで vite.config.ts 側に patchOnnxruntimeWasmUrlPlugin を追加してこの
+      # 二重同梱そのものを止めた上で、CI 側のゲートも次の3点を検査するよう強化する。
+      #   1. precache に dist/vendor 配下のパスが含まれないこと（従来通り）
+      #   2. precache に ort-wasm 系のファイル名が含まれないこと（今回の実際の事故を直接検出）
+      #   3. precache の合計サイズ（実ファイルサイズの合計）が閾値を超えないこと
+      #      （経路が変わっても「何か重いものが紛れ込んだ」こと自体を検出できるようにする保険）
+      # 3の閾値は 5MB とした。根拠: vendor と ORT wasm を除いた precache の実測値は
+      # 約1.6〜1.7MB（最大の内訳は zxing-wasm の zxing_reader-*.wasm、約1.1MB）であり、
+      # 通常の機能追加でこの値が数百KB増えても誤検知しないよう約3倍の余裕を持たせつつ、
+      # ORT wasm（約14MB）が一つでも紛れ込めば確実に超える値にしている。
+      - name: Service Worker が OCR エンジンをプリキャッシュしていないことを確認
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const sw = fs.readFileSync('dist/sw.js', 'utf8');
+          const m = sw.match(/precacheAndRoute\(\[([^\]]*)\]/s);
+          if (!m) {
+            console.error('::error::dist/sw.js から precacheAndRoute(...) が見つかりませんでした。vite-plugin-pwa の出力形式が変わった可能性があります');
+            process.exit(1);
+          }
+          const entries = new Function('return [' + m[1] + ']')();
+
+          // 1) PaddleOCR 一式（dist/vendor）が万一 precache に混入していないか
+          const vendorHit = entries.find((e) => /vendor\//.test(e.url));
+          if (vendorHit) {
+            console.error(`::error::OCRエンジン(dist/vendor)がプリキャッシュに含まれています: ${vendorHit.url}。vite.config.ts の workbox.globIgnores を確認してください`);
+            process.exit(1);
+          }
+
+          // 2) assets/ 経由で紛れ込む ONNX Runtime の wasm（今回実際に発生した事故）を検出する
+          const ortHit = entries.find((e) => /ort[-.]wasm/i.test(e.url));
+          if (ortHit) {
+            console.error(`::error::ONNX Runtime の wasm がプリキャッシュに含まれています: ${ortHit.url}。vite.config.ts の patchOnnxruntimeWasmUrlPlugin を確認してください`);
+            process.exit(1);
+          }
+
+          // 3) 経路によらない保険として、precache 合計サイズにも上限を設ける
+          const THRESHOLD_BYTES = 5 * 1024 * 1024;
+          let total = 0;
+          for (const e of entries) {
+            const url = decodeURIComponent(e.url.split('?')[0]);
+            total += fs.statSync(path.join('dist', url)).size;
+          }
+          console.log(`precache: ${entries.length} entries, ${(total / 1024 / 1024).toFixed(2)} MB`);
+          if (total > THRESHOLD_BYTES) {
+            console.error(`::error::Service Worker の precache 合計サイズが ${(total / 1024 / 1024).toFixed(2)}MB あり、閾値 ${(THRESHOLD_BYTES / 1024 / 1024).toFixed(1)}MB を超えています。重いファイルが誤って precache に含まれていないか vite.config.ts の workbox 設定を確認してください`);
+            process.exit(1);
+          }
+          console.log('OK: プリキャッシュに vendor / ORT wasm は含まれておらず、合計サイズも閾値以内です');
+          NODE
 
       - name: Pages 用にアップロード
         if: github.ref == 'refs/heads/main'

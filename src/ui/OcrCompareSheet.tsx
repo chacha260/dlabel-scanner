@@ -33,12 +33,16 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { CloseIcon, SpinnerIcon, WarningIcon } from './components/Icons'
+import { showToast } from './components/toastBus'
 import type { NormalizedRect } from '../scan/barcode/types'
 import {
   cropVideoSpaceRoi,
   cropVideoSpaceRoiRaw,
   DEFAULT_OCR_PREPROCESS_OPTIONS,
+  isPaddleReady,
+  preparePaddle,
   recognizeCaptured,
+  type OcrEngineId,
   type OcrPreprocessOptions,
   type OcrResult,
   type RoiRect,
@@ -51,6 +55,13 @@ type OcrCompareSheetProps = {
   videoRoi: RoiRect
   /** 検出済みバーコード枠（映像座標）。空配列もあり得る */
   maskRects: NormalizedRect[]
+  // どのエンジンで比較するか。呼び出し側（SimpleScanScreen.tsx）が今の画面で
+  // 実際に使っている既定エンジン（defaultOcrEngine）を渡す想定。
+  // 比較の軸はあくまで「前処理の組み合わせ」であってエンジンではないため、
+  // ここでエンジンごとの比較（ML Kit vs PaddleOCR）はしない。1回の比較実行は
+  // 常に単一のエンジンに対して行う（前処理設定だけを1軸で見比べる、という
+  // このパネル本来の目的をエンジンの軸で汚さないため）。
+  engine: OcrEngineId
   onClose: () => void
   /** 「この設定を使う」を押されたときに、採用された前処理設定を親へ返す */
   onAdopt: (preprocess: OcrPreprocessOptions) => void
@@ -145,7 +156,7 @@ function CapturedImageCanvas({ image, className }: { image: ImageData; className
   return <canvas ref={canvasRef} className={className} style={{ imageRendering: 'pixelated' }} />
 }
 
-export default function OcrCompareSheet({ frame, videoRoi, maskRects, onClose, onAdopt }: OcrCompareSheetProps) {
+export default function OcrCompareSheet({ frame, videoRoi, maskRects, engine, onClose, onAdopt }: OcrCompareSheetProps) {
   const [results, setResults] = useState<Record<string, PresetOutcome>>({})
   const [running, setRunning] = useState(false)
   // 実行中のプリセットの通し番号（0始まり）。進捗表示「n/m 実行中…」に使う。
@@ -165,6 +176,35 @@ export default function OcrCompareSheet({ frame, videoRoi, maskRects, onClose, o
     if (running) return
     setRunning(true)
     setResults({})
+
+    // PaddleOCRだけ、初回利用時に約35MBのモデル・wasmの読み込みが要る。
+    //
+    // 準備確認をこの画面自身の中（親のSimpleScanScreen.tsxではなく）で行うのは、
+    // 「この比較を実行するために本当に使えるエンジンか」をここで担保しないと、
+    // 未読み込みのままrecognizeCapturedを呼んで全プリセットが一律
+    // 「認識に失敗: PaddleOCRが初期化されていません…」で埋まる、という分かりにくい
+    // 壊れ方をするため。親側のhandleShutterOcrは「今回のシャッターに使うengine」の
+    // 準備しかしておらず、このパネルが渡されたengineが常にそれと同じである保証は
+    // 実装上の巡り合わせに過ぎない（例えば「精密読み取り」でengineを一時的に
+    // 切り替えた直後に比較を開いた場合、渡されるengineはdefaultOcrEngineのままで
+    // 一致しないことがある）。呼び出し元を信頼せず、ここでも自衛する。
+    // preparePaddleは仕様としてrejectしない（{ ok } を返す）ため、ok:falseを
+    // 握りつぶさずエラートーストで見せて比較全体を中断する（沈黙して失敗させない）。
+    if (engine === 'paddle') {
+      showToast(
+        `PaddleOCRで比較します（${ALL_PRESETS.length}件を順に実行。1件ごとに数百ms〜数秒かかるため、ML Kitより明確に時間がかかります）`,
+        'info',
+      )
+      if (!isPaddleReady()) {
+        const prepared = await preparePaddle((status) => showToast(status, 'info'))
+        if (!mountedRef.current) return
+        if (!prepared.ok) {
+          showToast(prepared.error, 'error')
+          setRunning(false)
+          return
+        }
+      }
+    }
 
     for (let i = 0; i < ALL_PRESETS.length; i++) {
       if (!mountedRef.current) return
@@ -192,7 +232,7 @@ export default function OcrCompareSheet({ frame, videoRoi, maskRects, onClose, o
       }
 
       try {
-        const result = await recognizeCaptured(image)
+        const result = await recognizeCaptured(image, engine)
         if (!mountedRef.current) return
         setResults((prev) => ({ ...prev, [preset.id]: { status: 'done', image, result } }))
       } catch (err) {
@@ -242,7 +282,17 @@ export default function OcrCompareSheet({ frame, videoRoi, maskRects, onClose, o
             </strong>
             下に並ぶ結果を見比べて、一番よく読めている設定の
             <strong className="text-slate-100">「この設定を使う」</strong>
-            を押してください。押した設定がこの後の読み取りで使われるようになります。
+            を押してください。押した設定がこの後の読み取りで使われるようになります（採用されるのは前処理の組み合わせだけで、
+            下のエンジンは変わりません）。
+          </p>
+          {/* 比較の軸は前処理の組み合わせだが、結論はエンジンごとに変わり得るため、
+              「今どちらのエンジンで走らせているか」を常に見える形で明示する
+              （採用判断をエンジン不明のまま行わせないため）。running中だけでなく
+              常時表示するのは、実行前の「これから何が起きるか」の判断材料にもするため。 */}
+          <p className="rounded-lg border border-cyan-700/50 bg-cyan-950/30 px-3 py-2 text-sm font-semibold text-cyan-200">
+            今回の比較は <strong>{engine === 'mlkit' ? 'ML Kit' : 'PaddleOCR'}</strong> で実行します。
+            {engine === 'paddle' &&
+              ' PaddleOCRは1件ごとに数百ms〜数秒かかるため、ML Kitより明確に時間がかかります（初回はモデル読み込みも入ります）。'}
           </p>
         </div>
 
@@ -311,7 +361,14 @@ export default function OcrCompareSheet({ frame, videoRoi, maskRects, onClose, o
                       </pre>
                     </div>
 
-                    <p className="text-sm text-slate-400">{outcome.result.ms}ms</p>
+                    {/* confidenceの意味はエンジンで違う（types.ts参照）。ML Kitは常に0
+                        （情報が無いという意味）なので出さず、PaddleOCRだけ実数値を出す。
+                        上のバナーで既にengineは明示済みだが、結果1件ごとにも数値の
+                        有無で「今どちらで読んだか」を再確認できるようにしておく。 */}
+                    <p className="text-sm text-slate-400">
+                      {outcome.result.ms}ms
+                      {engine === 'paddle' && ` / 信頼度 ${Math.round(outcome.result.confidence)}%`}
+                    </p>
 
                     <button
                       type="button"

@@ -363,17 +363,34 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             <ButtonRef icon={<ScanIcon className="h-4 w-4" />} tone="primary">
               枠内をOCR
             </ButtonRef>
-            を押します。文字認識には Google ML Kit（端末に組み込み済み）を使うため、
+            を押します。既定の文字認識には Google ML Kit（端末に組み込み済み）を使うため、
             ダウンロードは不要で、電波が無い場所でもそのまま使えます。
           </p>
           <p>
-            <strong className="text-amber-300">文字モードはAndroidアプリ（APK）版でのみ使えます。</strong>
+            <strong className="text-slate-100">既定のML Kitはアプリ（APK）版でのみ動きます。</strong>
             ブラウザ（このページをそのまま開いている場合）では ML Kit が使えないため、
-            シャッターボタンが押せない状態になり、その旨の案内が表示されます。
+            代わりに次で説明する PaddleOCR に自動で切り替わり、そのまま文字モードが使えます。
+          </p>
+          <p>
+            <strong className="text-cyan-300">「精密読み取り」で、その場でもう一段階読み直す</strong>
+          </p>
+          <p>
+            ML Kit で読んだ結果カードには
+            <ButtonRef>精密読み取り</ButtonRef>
+            ボタンが出ます。これは<strong className="text-slate-100">撮り直さず、今表示している同じ画像のまま</strong>
+            別系統のエンジン（PaddleOCR）で読み直すボタンです。ML Kit は速い代わりに読み取れない
+            ときの打ち手が「撮り直す」しかありませんでしたが、このボタンを押せば設定を開かずその場で
+            もう一度、より時間をかけた高精度な認識を試せます。
+            <strong className="text-amber-300">初回だけモデルの読み込み（約35MB）が走り、ML Kitより明確に低速です</strong>
+            が、読み込み中は画面上部にその旨がその都度案内されます。
+            PaddleOCR は信頼度（どれくらい確からしいか）の実際の数値も返すため、結果カードの表示にも
+            使ったエンジン名と信頼度が出ます（ML Kitは信頼度を返さないため、ML Kitで読んだときは
+            その旨の注記だけになります）。ブラウザでは既定がPaddleOCRなので、このボタン自体は
+            出ません（すでにPaddleOCRで読んでいるボタンを押しても無意味なため）。
           </p>
           <p>
             結果カードには、読み取り結果のほかにこのアプリで唯一の設定（抽出フィルタ・
-            バーコード自動除外）がまとまっています。
+            バーコード自動除外・既定で使うOCRエンジン）がまとまっています。
             <strong className="text-slate-100">実物の現品票を読ませてみながら調整してください。</strong>
           </p>
         </Section>

@@ -12,12 +12,72 @@ build:
       export BASE_PATH="$(printf '%s/' "$RAW_PATH" | sed -E 's#//+#/#g')"
       echo "BASE_PATH=$BASE_PATH"
     - pnpm build
+    - du -h dist/assets/* | sort -h
     # 以前はここに「OCRエンジン(tesseract.js、約16MB)がプリキャッシュに混入していないか」
     # を確認するチェックがあった（GitHub Actions 側の ci.yml と対になる仕組み）。
-    # tesseract.js を完全に削除し public/vendor 自体が無くなったため、OCRエンジン
-    # （ML Kit）はそもそも Web バンドル・Service Worker のキャッシュ対象になり得ず、
-    # このチェックが守っていた回帰は構造的に発生しなくなったので削除した。
-    - du -h dist/assets/* | sort -h
+    # tesseract.js を完全に削除し public/vendor 自体が無くなったため一度は削除したが、
+    # PaddleOCR（onnxruntime-web）の追加で事情が元に戻った。しかもPaddleOCR追加後、
+    # 実際に次の事故が起きていたことが判明した:
+    # onnxruntime-web パッケージ内の
+    # `new URL("ort-wasm-simd-threaded.wasm", import.meta.url)` という記述を Vite が
+    # 静的アセット参照として解決してしまい、dist/vendor/onnxruntime/ 以下と全く同じ
+    # 14MBの wasm が dist/assets/ort-wasm-simd-threaded-<hash>.wasm としてもう一部
+    # コピーされる。しかも dist/assets/ 配下にあるため vite.config.ts の
+    # workbox.globIgnores（'**/vendor/**'）には一致せず、globPatterns の 'wasm' には
+    # 一致してしまうため、この14MBが Service Worker の precache に静かに紛れ込む。
+    # vite.config.ts 側に patchOnnxruntimeWasmUrlPlugin を追加してこの二重同梱そのものを
+    # 止めたが、CI 側でも GitHub Actions の ci.yml と同じ内容のゲートを復活・強化して
+    # 置く（このリポジトリの方針として GitHub Actions と GitLab CI は同じ内容を用意する）。
+    # 検査するのは次の3点:
+    #   1. precache に dist/vendor 配下のパスが含まれないこと
+    #   2. precache に ort-wasm 系のファイル名が含まれないこと（今回の実際の事故を直接検出）
+    #   3. precache の合計サイズ（実ファイルサイズの合計）が閾値を超えないこと
+    #      （経路が変わっても「何か重いものが紛れ込んだ」こと自体を検出できる保険）
+    # 3の閾値は 5MB とした。根拠: vendor と ORT wasm を除いた precache の実測値は
+    # 約1.6〜1.7MB（最大の内訳は zxing-wasm の zxing_reader-*.wasm、約1.1MB）であり、
+    # 通常の機能追加でこの値が数百KB増えても誤検知しないよう約3倍の余裕を持たせつつ、
+    # ORT wasm（約14MB）が一つでも紛れ込めば確実に超える値にしている。
+    - |
+      node <<'NODE'
+      const fs = require('fs');
+      const path = require('path');
+
+      const sw = fs.readFileSync('dist/sw.js', 'utf8');
+      const m = sw.match(/precacheAndRoute\(\[([^\]]*)\]/s);
+      if (!m) {
+        console.error('dist/sw.js から precacheAndRoute(...) が見つかりませんでした。vite-plugin-pwa の出力形式が変わった可能性があります');
+        process.exit(1);
+      }
+      const entries = new Function('return [' + m[1] + ']')();
+
+      // 1) PaddleOCR 一式（dist/vendor）が万一 precache に混入していないか
+      const vendorHit = entries.find((e) => /vendor\//.test(e.url));
+      if (vendorHit) {
+        console.error(`OCRエンジン(dist/vendor)がプリキャッシュに含まれています: ${vendorHit.url}。vite.config.ts の workbox.globIgnores を確認してください`);
+        process.exit(1);
+      }
+
+      // 2) assets/ 経由で紛れ込む ONNX Runtime の wasm（今回実際に発生した事故）を検出する
+      const ortHit = entries.find((e) => /ort[-.]wasm/i.test(e.url));
+      if (ortHit) {
+        console.error(`ONNX Runtime の wasm がプリキャッシュに含まれています: ${ortHit.url}。vite.config.ts の patchOnnxruntimeWasmUrlPlugin を確認してください`);
+        process.exit(1);
+      }
+
+      // 3) 経路によらない保険として、precache 合計サイズにも上限を設ける
+      const THRESHOLD_BYTES = 5 * 1024 * 1024;
+      let total = 0;
+      for (const e of entries) {
+        const url = decodeURIComponent(e.url.split('?')[0]);
+        total += fs.statSync(path.join('dist', url)).size;
+      }
+      console.log(`precache: ${entries.length} entries, ${(total / 1024 / 1024).toFixed(2)} MB`);
+      if (total > THRESHOLD_BYTES) {
+        console.error(`Service Worker の precache 合計サイズが ${(total / 1024 / 1024).toFixed(2)}MB あり、閾値 ${(THRESHOLD_BYTES / 1024 / 1024).toFixed(1)}MB を超えています。重いファイルが誤って precache に含まれていないか vite.config.ts の workbox 設定を確認してください`);
+        process.exit(1);
+      }
+      console.log('OK: プリキャッシュに vendor / ORT wasm は含まれておらず、合計サイズも閾値以内です');
+      NODE
   artifacts:
     paths:
       - dist

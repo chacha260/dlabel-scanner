@@ -376,6 +376,83 @@ const APACHE_2_0_TEXT = `                                 Apache License
 
 const MANUAL_VENDOR_ENTRIES = [
   {
+    // PaddleOCR のモデルは npm パッケージではなく、public/vendor/paddleocr/ へ
+    // 手動でダウンロードして同梱しているバイナリ（合計約21MB）。pnpm の依存解決には
+    // まったく出てこないが、実際にビルド成果物・APK へ含まれるため手書きで補う。
+    name: 'PaddleOCR PP-OCRv5 mobile (ONNXモデル・辞書)',
+    version: 'PP-OCRv5 mobile (ONNX変換版)',
+    spdx: 'Apache-2.0',
+    author: 'PaddlePaddle Authors',
+    homepage: 'https://github.com/PaddlePaddle/PaddleOCR',
+    licenseText: `【同梱物について】
+public/vendor/paddleocr/ 以下の次の3ファイルは、PaddleOCR（PP-OCRv5 mobile）の
+学習済みモデルを ONNX へ変換したものと、その文字辞書です。
+
+  - ppocrv5-mobile-det.onnx   （文字領域の検出モデル、約4.7MB）
+  - ppocrv5-mobile-rec.onnx   （文字認識モデル、約16.5MB）
+  - ppocrv5_dict.txt          （文字辞書、18383行）
+
+入手元は Hugging Face の bukuroo/PPOCRv5-ONNX（ライセンス表記 apache-2.0）で、
+上流の PaddleOCR 本体と同じ Apache License 2.0 です。
+
+【出所についての注意】
+この ONNX 変換版の配布リポジトリは、取得時点でダウンロード数が0の個人アカウント
+でした。ONNX はデータ形式であり実行コードが混入する性質のものではないこと、
+ライセンスが上流と整合していることを確認したうえで採用していますが、
+「広く使われている配布元から取得したもの」ではない点は把握しておいてください。
+PaddleOCR 公式（PaddlePaddle）が配布しているのは Paddle 推論形式
+（inference.json / inference.pdiparams）であり ONNX ではないため、
+公式から直接 ONNX を得ることはできず、変換済みのものを使う必要がありました。
+自前で変換し直す場合は paddle2onnx（Python + paddlepaddle）を使います。
+
+${APACHE_2_0_TEXT}`,
+  },
+  {
+    // onnxruntime-web は npm 依存として自動収集されるが、その配布物である
+    // wasm バイナリを public/vendor/onnxruntime/ へコピーして自前配信している
+    // （CSP が connect-src 'self' のため CDN から取得できない）。
+    // 実体が配布物に含まれることを明示するために手書きでも1件立てておく。
+    name: 'ONNX Runtime Web (同梱wasm)',
+    version: 'onnxruntime-web 1.29.0 同梱版',
+    spdx: 'MIT',
+    author: 'Microsoft Corporation',
+    homepage: 'https://github.com/microsoft/onnxruntime',
+    licenseText: `【同梱物について】
+public/vendor/onnxruntime/ 以下の次の2ファイルは、npm パッケージ onnxruntime-web の
+配布物（WebAssembly 版 ONNX Runtime）を手動でコピーして同梱したものです。
+
+  - ort-wasm-simd-threaded.wasm  （約14MB）
+  - ort-wasm-simd-threaded.mjs
+
+このアプリの CSP は connect-src 'self' で外部との通信を遮断しているため、
+onnxruntime-web の既定である CDN からの wasm 取得は使えません。そのため
+アプリ自身が配信する静的ファイルとして同梱し、ort.env.wasm.wasmPaths を
+そこへ向けています。ライセンス本文は onnxruntime-web 本体と同じ MIT License です
+（本一覧に npm 依存として別途自動収集されているエントリも参照してください）。
+
+MIT License
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.`,
+  },
+  {
     // ML Kit は npm パッケージ（@capacitor-mlkit/text-recognition）とは別に、
     // Android のネイティブ依存（com.google.mlkit:text-recognition）として
     // APK の中に取り込まれる。Gradle の依存であって pnpm の依存解決には

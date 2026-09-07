@@ -3,8 +3,9 @@
 現品票・Dラベルスキャナを、GitHub Pages（ブラウザ版）とは別に、Capacitor で
 Android の APK としてパッケージ化したものです。**ホスティング元（サーバー）を
 一切介さず、端末内だけで完結して動く**ことがこの APK 版の目的です。HTML / JS /
-CSS / WebAssembly（zxing）・OCRエンジン（ML Kit、Androidネイティブ依存として
-静的リンク）・アイコンまで、すべて APK の中に同梱されています。ネットワーク通信の許可（`INTERNET`
+CSS / WebAssembly（zxing、および読めないとき用のPaddleOCR一式）・OCRエンジン
+（ML Kit、Androidネイティブ依存として静的リンク）・アイコンまで、すべて APK
+の中に同梱されています。ネットワーク通信の許可（`INTERNET`
 権限）自体を持たないビルドにしているため、「通信しない設定にしている」では
 なく「そもそも外部と通信できない」状態になっています（詳細は下記）。
 
@@ -119,6 +120,11 @@ Web版のカメラ起動は `navigator.mediaDevices.getUserMedia()`
       いない。もし OCR 実行時に `NoClassDefFoundError` で落ちるようなら、
       `build.gradle` の `configurations.all { exclude ... }` ブロックを
       コメントアウトすれば元に戻る（APKは太るが動作する）
+- [ ] **「精密読み取り」（PaddleOCR）が動作すること**（重要・新規）。初回は
+      約35MB（モデル21MB + ONNX Runtime の wasm 14MB）の読み込みが走るので、
+      進捗表示が出たうえで最終的に文字が読めることを確認する。ML Kit より
+      明確に遅い（数百ms〜数秒）のは仕様。なおこの経路はブラウザでも動くため、
+      APK を焼く前に `pnpm dev` で先に確認しておくと切り分けが早い
 - [ ] トーチ（フラッシュ）・ズームの操作が動作する端末では機能する
 - [ ] コピー・削除・全部コピー・クリアなど一覧操作が動作する
 - [ ] 画面回転しても縦向きに固定されている
@@ -241,13 +247,22 @@ Secrets の登録が不要なぶん手軽ですが、次の制約があります
 
 ## 10. OCRエンジンについて（Web版との違い）
 
-**現在、OCR（文字モード）は APK 版でのみ動作します。** OCRエンジンは
-Google ML Kit（`com.google.mlkit:text-recognition`、Androidのネイティブ
-依存として APK に静的リンク）の1本で、Capacitor のネイティブプラグイン
-経由でしか呼び出せないためです。Web版（`pnpm dev` / GitHub Pages）では
-ML Kit のプラグインが存在せず、文字モードのシャッターボタンは無効化され、
-「OCRはAndroidアプリ版でのみ利用できます」という案内が表示されます
-（バーコードモードは Web版でも従来通り動作します）。
+**既定のOCRエンジンは Google ML Kit（`com.google.mlkit:text-recognition`、
+Androidのネイティブ依存として APK に静的リンク）で、Capacitor の
+ネイティブプラグイン経由でしか呼び出せないため APK 版でのみ動作します。**
+Web版（`pnpm dev` / GitHub Pages）では ML Kit のプラグインが存在しません。
+
+ただし現在は、読めなかったとき用の高精度・低速な第2のエンジンとして
+PaddleOCR（[onnxruntime-web](https://onnxruntime.ai/) による WASM 実装）を
+追加しており、これはブラウザでも動作します。そのため Web版では
+ML Kit の代わりに自動的にこちらへ切り替わり、**文字モードのシャッター
+ボタンは無効化せず、そのまま押せます**（初回だけ約35MBの読み込みが
+走り、ML Kitより認識に時間がかかる旨を事前にバナーで案内します）。
+以前はここが「OCRはAndroidアプリ版でのみ利用できます」という禁止の
+案内だけを出す作りでしたが、PaddleOCR の追加に伴って撤去しています。
+詳細は [`README.md`](../README.md) の「3.5. 読めないとき用に PaddleOCR
+を追加」を参照してください（バーコードモードは Web版でも従来通り
+動作します）。
 
 ML Kit は端末に組み込まれたモデルであり、ダウンロードという工程自体が
 無いため、インストール直後・初回起動時から通信なしで即座に OCR が
@@ -296,3 +311,25 @@ ML Kit は端末に組み込まれたモデルであり、ダウンロードと�
 最終的には tesseract.js 自体を削除して ML Kit に一本化しました。
 ML Kit は Android のネイティブモデルであり、この種の「fetch 経路での
 展開の曖昧さ」は構造的に発生し得ません。
+
+### APK サイズについて
+
+PaddleOCR の追加により、APK には次のものが同梱されます。
+
+| 内訳 | サイズ |
+| --- | --- |
+| ML Kit 文字認識モデル（Latin、bundled） | 約4MB |
+| PaddleOCR 検出モデル（ONNX） | 4.7MB |
+| PaddleOCR 認識モデル（ONNX） | 16.5MB |
+| PaddleOCR 文字辞書 | 0.1MB |
+| ONNX Runtime の wasm | 14MB |
+
+ML Kit だけなら約4MBで済むところ、「読めないとき用の第2の手段」のために
+約35MB を追加で背負っている構成です。サイズが問題になる場合は、
+`public/vendor/paddleocr/` と `public/vendor/onnxruntime/` を削除し、
+`src/scan/ocr/paddle/` への参照を外せば ML Kit のみの構成に戻せます。
+
+**修正前は、この表の「ONNX Runtime の wasm 14MB」がもう1部余計に APK へ入っていました。** `onnxruntime-web` パッケージ内の「`wasmPaths` 未設定時のフォールバック」記述（`new URL("ort-wasm-simd-threaded.wasm", import.meta.url)`）を Vite が静的アセット参照として解決してしまい、`public/vendor/onnxruntime/` に置いた14MBのwasmと中身が同じファイルが `dist/assets/` 側にもう1部生成され、`PACKAGED=1`（APK版）のビルドでもそのまま同梱されていました。つまりこの表のPaddleOCR関連の合計はかつて実質**約49MB**（14MB分は完全な無駄）で、APKは今より14MB太っていたことになります。`vite.config.ts` に静的解決を回避する `patchOnnxruntimeWasmUrlPlugin` を追加して塞ぎ、上の表は現在の（重複が無い）実測値です。経緯の詳細は [`README.md`](../README.md) の「3.6. precache への14MBの二重同梱事故」を参照してください（この節はWeb版のService Worker precacheの文脈で書かれていますが、`dist/assets/` への二重生成自体はWeb版・APK版共通の欠陥でした）。
+
+なお ML Kit 側は、未使用スクリプト4種（中国語・デーヴァナーガリー・日本語・韓国語、
+計約16MB）を `android/app/build.gradle` の `configurations.all` で除外済みです。
