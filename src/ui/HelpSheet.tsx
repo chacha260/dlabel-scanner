@@ -359,17 +359,22 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             </li>
           </ul>
           <p>
-            枠を合わせたら
+            シャッター（
             <ButtonRef icon={<ScanIcon className="h-4 w-4" />} tone="primary">
               枠内をOCR
             </ButtonRef>
-            を押します。既定の文字認識には Google ML Kit（端末に組み込み済み）を使うため、
-            ダウンロードは不要で、電波が無い場所でもそのまま使えます。
+            ）のすぐ上にある<strong className="text-slate-100">「エンジン」</strong>
+            で、文字認識に使うエンジンを撮る前に選べます。既定は Google ML Kit
+            （端末に組み込み済み）で、ダウンロードは不要、電波が無い場所でもそのまま使えます。
+            「毎回もう一方のPaddleOCRで読みたい」という場合は、撮る前にここで切り替えておけます
+            （選択は次回起動時も記憶されます）。
           </p>
           <p>
             <strong className="text-slate-100">既定のML Kitはアプリ（APK）版でのみ動きます。</strong>
             ブラウザ（このページをそのまま開いている場合）では ML Kit が使えないため、
-            代わりに次で説明する PaddleOCR に自動で切り替わり、そのまま文字モードが使えます。
+            代わりに次で説明する PaddleOCR に自動で切り替わり、そのまま文字モードが使えます
+            （このときは「エンジン」の選択自体を表示しません。選べてもML Kitが動かないため
+            混乱のもとになるだけだからです）。
           </p>
           <p>
             <strong className="text-cyan-300">「精密読み取り」で、その場でもう一段階読み直す</strong>
@@ -389,9 +394,9 @@ export default function HelpSheet({ onClose, onOpenLicenses }: HelpSheetProps) {
             出ません（すでにPaddleOCRで読んでいるボタンを押しても無意味なため）。
           </p>
           <p>
-            結果カードには、読み取り結果のほかにこのアプリで唯一の設定（抽出フィルタ・
-            バーコード自動除外・既定で使うOCRエンジン）がまとまっています。
-            <strong className="text-slate-100">実物の現品票を読ませてみながら調整してください。</strong>
+            結果カードには、読み取り結果のほかに抽出フィルタ・バーコード自動除外の設定が
+            まとまっています（エンジンの選択は上で説明したとおり、シャッターの上に移して
+            あります）。<strong className="text-slate-100">実物の現品票を読ませてみながら調整してください。</strong>
           </p>
         </Section>
 

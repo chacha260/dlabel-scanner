@@ -159,8 +159,9 @@ const FILTER_OPTIONS: { value: OcrFilterMode; label: string }[] = [
   { value: 'alnum', label: OCR_FILTER_LABELS.alnum },
 ]
 
-// 既定エンジン設定（結果カード内の控えめなSelect）の選択肢。ML Kitが実際に動く
-// 環境（mlkitAvailable）でだけ表示するため、この配列自体は常に両方持たせておき、
+// 既定エンジン設定（文字モード固有・シャッターの上に置く、撮る前から見えるSelect。
+// 位置の詳細は下のJSX側のコメント参照）の選択肢。ML Kitが実際に動く環境
+// （mlkitAvailable）でだけ表示するため、この配列自体は常に両方持たせておき、
 // レンダー側で出す/出さないを切り替える（環境ごとに別配列を持つと選択肢の文言を
 // 2箇所でメンテすることになるため）。
 const OCR_ENGINE_OPTIONS: { value: OcrEngineId; label: string }[] = [
@@ -541,7 +542,8 @@ export function SimpleScanScreen() {
   // なった（下の defaultOcrEngine・banner の JSX を参照）。
   const [mlkitAvailable] = useState(isMlKitAvailable)
 
-  // 既定で使うOCRエンジン（結果カード内の控えめな設定。README「3.5」参照）。
+  // 既定で使うOCRエンジン（文字モード固有・シャッターの上で撮る前から選べる設定。
+  // README「3.5」参照）。
   // 保存値（前回選んでいた値）を復元するが、これはあくまで「最後に選ばれていた値」
   // でしかない。ブラウザでは ML Kit がそもそも動かないため、保存値が 'mlkit' で
   // あっても実際に使うエンジンはここで 'paddle' に読み替える。環境判定はここ
@@ -1425,12 +1427,18 @@ export function SimpleScanScreen() {
           </div>
         )}
 
-        {/* OCR結果カード: 直近の読み取り結果と、このアプリで唯一の設定（抽出フィルタ・
-            バーコード自動除外）。文字モードだけに属する UI であり、バーコード
-            モードでは（処理中の状態が残っていても）表示しない。
+        {/* OCR結果カード: 直近の読み取り結果と、抽出フィルタ・バーコード自動除外の
+            設定。文字モードだけに属する UI であり、バーコードモードでは
+            （処理中の状態が残っていても）表示しない。
             以前はここに「OCRエンジン」（Tesseract/ML Kit）の切り替え、PSM選択、
             「丁寧に読む」トグルもあったが、tesseract.js を削除してエンジンが
-            ML Kit の1つだけになったため、選ぶ余地の無いこれらの UI は削除した。 */}
+            ML Kit の1つだけになったため、選ぶ余地の無いこれらの UI は削除した。
+            その後 PaddleOCR 追加に伴って既定エンジンのSelectを一度ここに復活
+            させたが、「読み取りに成功するまでこのカード自体が出ない＝撮る前に
+            選べない」という欠点があったため、シャッターを押す前から見える
+            文字モード固有の設定（バーコードモードの「読み取り契機」と対になる
+            位置）へ移し、ここからは削除した（README「3.5」参照）。読めなかった
+            直後にその場で切り替える「精密読み取り」ボタンはここに残っている。 */}
         {mode === 'ocr' && !ocrBusy && capturedImage && ocrInfo && (
           <div className="flex flex-col gap-2 rounded-lg bg-slate-800 p-2.5">
             <div className="flex flex-wrap items-center gap-2">
@@ -1564,22 +1572,14 @@ export function SimpleScanScreen() {
               hint="枠内で検出したバーコードを塗りつぶしてから読み取ります。OFFにして「同じ画像で再認識」を押すと塗りつぶさずに読み直せます。"
             />
 
-            {/* 既定エンジンの控えめな設定（README「3.5」・prefs.ts loadOcrEngineの
-                コメント参照）。主役はあくまで上の「精密読み取り」ボタンで、これは
-                「毎回PaddleOCRで読みたい」という運用のための脇役なので、共通設定バーや
-                フッターの一等地には置かず、この結果カードの末尾に控えめに置く。
-                ブラウザ（!mlkitAvailable）では ML Kit がそもそも動かず、選択肢を
-                出しても選べるのに動かないという混乱を招くだけなので、この設定自体を
-                出さない（常にPaddleOCR固定であることは、上の警告バナーで既に説明済み）。 */}
-            {mlkitAvailable && (
-              <Select
-                className="min-h-9 text-xs"
-                value={ocrEnginePref}
-                onChange={(e) => handleChangeOcrEnginePref(e.target.value as OcrEngineId)}
-                options={OCR_ENGINE_OPTIONS}
-                aria-label="既定のOCRエンジン"
-              />
-            )}
+            {/* 既定エンジンのSelectは以前ここ（結果カードの末尾）にあったが、
+                「シャッターを押す前から見える文字モード固有の設定」（バーコードモードの
+                「読み取り契機」と対になる位置）へ移した。読み取りに一度成功しないと
+                このカード自体が表示されず、ML Kitで読む前にPaddleOCRを選んでおく、
+                ということができなかったため（README「3.5」参照）。同じ設定を
+                2箇所に残すと現場が混乱するので、ここには置かない。読めなかった
+                直後にその場で切り替えたいだけなら、すぐ上の「精密読み取り」ボタンが
+                主役のまま変わらず残っている。 */}
           </div>
         )}
 
@@ -1617,6 +1617,45 @@ export function SimpleScanScreen() {
             </div>
             <p className="pl-[3.25rem] text-[10px] text-slate-500">
               {TRIGGER_MODE_OPTIONS.find((opt) => opt.value === triggerMode)?.hint}
+            </p>
+          </div>
+        )}
+
+        {/* OCRエンジンの選択（文字モード固有。バーコードモードの「読み取り契機」と
+            対になる位置に置く）。
+            以前はこのSelectが結果カードの中にしか無く、**一度読み取りに成功しないと
+            表示されない**という欠点があった。つまり「ML Kitで読む前にPaddleOCRを
+            選んでおく」ができなかった（現場要望: 既定はML Kitのままでよいが、
+            読む前にPaddleOCRを選べるようにしたい）。シャッターを押す前から常に見える
+            この位置へ移すことで、この欠点を解消する。
+            置き場所の判断: README冒頭の「設定は上、その場の操作は下」に従うと、
+            エンジン選択は「一度決めたらしばらく変えない設定」なのでシャッター
+            （その場の操作）より上に置くべきだが、バーコードの「枠内のみ」等と違って
+            **OCR専用の設定**なので、両モード共通の設定バー（画質・整形）ではなく、
+            バーコード固有ブロックと対になる「文字モード固有」の位置に置く。
+            同じ設定を結果カードにも残すと設定が2箇所に増えてしまう
+            （整形ルールをバーコード・OCRで1つに統合したのと同じ理由でこのリポジトリが
+            避けている状態）ため、結果カード側にあった同じSelectは削除した
+            （README「3.5」参照）。「精密読み取り」ボタンは読めなかった直後にその場で
+            押す導線として結果カードにそのまま残っている。
+            ブラウザ（!mlkitAvailable）ではML Kitがそもそも動かず
+            （defaultOcrEngineが常に'paddle'へ読み替わる）、選べても選んだ通りには
+            動かないという混乱を招くだけなので、結果カード側にあった時と同じ基準で
+            ここでも表示自体をしない。 */}
+        {mode === 'ocr' && mlkitAvailable && (
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center gap-2 text-[11px]">
+              <span className="shrink-0 font-semibold text-slate-400">エンジン</span>
+              <Select
+                className="min-h-8 flex-1 text-[11px]"
+                value={ocrEnginePref}
+                onChange={(e) => handleChangeOcrEnginePref(e.target.value as OcrEngineId)}
+                options={OCR_ENGINE_OPTIONS}
+                aria-label="文字認識に使うOCRエンジン"
+              />
+            </div>
+            <p className="pl-[3.25rem] text-[10px] text-slate-500">
+              次にシャッターを押したときに使うエンジンです（選択は次回起動時も記憶されます）。読めなかったときにその場だけ切り替えたいなら、結果カードの「精密読み取り」の方が手早いです。
             </p>
           </div>
         )}

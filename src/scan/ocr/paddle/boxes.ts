@@ -188,10 +188,15 @@ function averageProbInBox(probMap: ArrayLike<number>, mapWidth: number, x0: numb
 }
 
 /**
- * DBNet後処理の全体パイプライン。手順は仕様として指定されたとおりの順序で行う
+ * DBNet後処理の全体パイプライン。手順は本家PaddleOCR（DB後処理）と同じ順序で行う
  * （二値化 → 連結成分 → 軸平行バウンディングボックス → 小さい箱の除外 →
- * unclip → スコアリング・閾値フィルタ → 元画像座標への変換）。最後に読み順
- * ソート（geometry.ts）まで行って返す。
+ * 「拡張前（tight）の箱」でのスコアリング・閾値フィルタ → 通過した箱だけをunclip →
+ * 元画像座標への変換）。最後に読み順ソート（geometry.ts）まで行って返す。
+ *
+ * スコアリングを必ずunclipより前に行う理由は、下のループ内コメント（★印）に
+ * 実測値つきで詳しく書いてある。一度この順序を逆にしたことで「boxThresholdの既定値
+ * 0.6を数学的に絶対に満たせず、検出が常に0件になる」という致命的な不具合を
+ * 起こしたことがあるため、同じ壊し方を二度と繰り返さないための記録として残している。
  *
  * probMap は検出モデル出力（[N,1,H,W] のNとチャンネル次元を除いた H*W の平坦配列）。
  * mapWidth・mapHeight はその H・W（＝検出用にリサイズした入力画像と同じ空間サイズ。
@@ -233,7 +238,36 @@ export function postprocessDetection(
     // 4. 小さすぎる箱を除外
     if (Math.min(boxW, boxH) < opt.minSidePx) continue
 
-    // 5. unclip（外側へ拡張）
+    // 5. スコアリング・閾値フィルタ（★ここが本家との対応で最重要。必ずunclipより先に行う★）
+    //
+    // なぜ「unclipの前」でなければならないか（一度この順序を逆にして全滅を出した教訓）:
+    // 本家PaddleOCR（DB後処理のbox_score_fast）は、確率マップを二値化して得た輪郭の
+    // 「拡張前（tight）の内側」で確率平均を取り、box_threshと比較する。ここを通過した
+    // 輪郭だけをunclipで外側へ広げる。この順序を逆にする（＝unclipした後の矩形で
+    // スコアを取る）と、数学的にbox_threshを満たす箱が一切存在しなくなる。
+    //
+    // unclipBox は distance = 面積×unclipRatio / 周長 だけ各辺を外側に広げる
+    // （geometry.ts参照）。unclipRatio=1.5のとき、拡張後の面積は元の面積のおよそ
+    // 2.5〜3倍になる。したがって、たとえ元の箱の内部が確率1.0で完全に埋まっていても、
+    // 拡張後の矩形全体で平均を取れば「元の面積 / 拡張後の面積」＝せいぜい0.33〜0.40
+    // （正方形に近いほど0.33に近づき、極端に細長いほど0.40に漸近するが、それを超えることは
+    // 原理的にあり得ない）にしかならない。ところが DEFAULT_BOX_THRESHOLD は 0.6。
+    // つまり「unclip後にスコアを取る」実装は、画像に何が写っていようと絶対にこの閾値を
+    // 満たせず、detectTextBoxes は常に空配列、recognizeWithPaddle は常に空文字を返し、
+    // UIは毎回「文字を読み取れませんでした」になる（実測: 内部0.95・外部0.02の理想的な
+    // 確率マップでも、240x26/120x20/400x40/60x16のいずれもunclip後スコアは0.34〜0.37に
+    // 留まり、0.6を一度も超えなかった）。
+    //
+    // このバグが長く見過ごされた理由: 純粋関数のユニットテスト（boxes.test.ts）が
+    // すべて boxThreshold を 0.2 まで明示的に下げて渡しており、しかも期待値そのものが
+    // 「拡張後の面積で割った値」を正解としてハードコードしていたため、既定値（0.6）の
+    // 経路が一度もテストされていなかった。テストが不具合を追認してしまっていた。
+    // このため、tightスコアの回帰テストを別途 boxes.test.ts に追加してある（そちらの
+    // コメントも参照）。
+    const tightScore = averageProbInBox(probMap, w, comp.minX, comp.minY, comp.maxX + 1, comp.maxY + 1)
+    if (tightScore < opt.boxThreshold) continue
+
+    // 6. unclip（外側へ拡張）。ここに来るのは5を通過した箱だけ。
     const expanded = unclipBox({ x: comp.minX, y: comp.minY, w: boxW, h: boxH }, opt.unclipRatio)
 
     // マップの範囲外を参照しない・座標変換の両方のため、マップ境界にクランプする
@@ -243,17 +277,14 @@ export function postprocessDetection(
     const y1 = Math.min(h, Math.ceil(expanded.y + expanded.h))
     if (x1 <= x0 || y1 <= y0) continue
 
-    // 6. スコアリング・閾値フィルタ
-    const score = averageProbInBox(probMap, w, x0, y0, x1, y1)
-    if (score < opt.boxThreshold) continue
-
-    // 7. 元画像座標へ変換
+    // 7. 元画像座標へ変換。score には実際に判定へ使ったtightスコアをそのまま入れる
+    // （unclip後の値を入れ直すと「何を根拠に採用したか」と表示される値が食い違うため）。
     boxes.push({
       x: x0 * scale.scaleX,
       y: y0 * scale.scaleY,
       w: (x1 - x0) * scale.scaleX,
       h: (y1 - y0) * scale.scaleY,
-      score,
+      score: tightScore,
     })
   }
 

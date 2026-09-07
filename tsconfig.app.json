@@ -22,5 +22,16 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // src/scan/ocr/paddle/__tests__/e2e-real-model.test.ts だけは除外する。
+  // このファイルは onnxruntime-node（本体の依存には含めない、検証時だけ一時的に
+  // 入れる使い捨ての devDependency）と node:fs / node:path / process を使うが、
+  // それらの型定義を通すには "types" に "node" を足す必要があり、そうすると
+  // アプリ本体（ブラウザ向け・DOM前提）のコード全体の型チェックにNodeのグローバル
+  // 型が混ざってしまう。このテスト自体はvitestが素通しでトランスパイルするだけの
+  // 型チェック不要な検証用コード（onnxruntime-node が無い環境ではdescribe.skipIfで
+  // 丸ごとskipされる）なので、`tsc -b`（`pnpm run build`）の対象からだけ外す。
+  // `pnpm test`（vitest）は tsconfig の include/exclude を見ないため、この除外の
+  // 影響を受けずに実行・skip判定される。
+  "exclude": ["src/scan/ocr/paddle/__tests__/e2e-real-model.test.ts"]
 }
