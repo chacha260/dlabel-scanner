@@ -12,16 +12,16 @@
 //
 // 現場の要件がまだ固まっていないため、まずはこの最小読み取りツールを持って行き、
 // 実際に何が必要かを確認するためのもの。ラベル定義エディタ・履歴・CSV書き出し・
-// 設定画面などの既存機能は src/ui/legacy 以下に退避してあり、削除はしていない。
+// 設定画面などの既存機能は以前 src/ui/legacy 以下に退避してあったが、利用者の
+// 判断で削除した（必要になれば git 履歴から復元できる。README「削除した機能」参照）。
 
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { RawScan } from '../parse/types'
 import type { NormalizedRect } from '../scan/barcode/types'
 import { CAPTURE_QUALITY_OPTIONS, type CaptureQuality } from '../camera/quality'
 import { useCamera } from '../camera/useCamera'
 import { resolveZoomValue } from '../camera/zoom'
-import { useBarcodeScanner } from '../scan/useBarcodeScanner'
+import { type RawScan, useBarcodeScanner } from '../scan/useBarcodeScanner'
 import { isAnyOverlayOpen, isBarcodeScanEnabled, type BarcodeTriggerMode, type ScanMode } from '../scan/scanGating'
 import { applyTrimRules, DEFAULT_TRIM_RULES, visualizeControlChars, type TrimRules } from '../scan/barcode/trim'
 import { truncateForDisplay } from '../scan/barcode/truncate'
@@ -31,9 +31,7 @@ import {
   loadBarcodeTriggerMode,
   loadCaptureQuality,
   loadHelpSeen,
-  loadOcrEngine,
   loadOcrFilterMode,
-  loadOcrPreprocess,
   loadRestrictToRoi,
   loadScanMode,
   loadSoundEnabled,
@@ -43,9 +41,7 @@ import {
   saveBarcodeGuardRules,
   saveBarcodeTriggerMode,
   saveCaptureQuality,
-  saveOcrEngine,
   saveOcrFilterMode,
-  saveOcrPreprocess,
   saveRestrictToRoi,
   saveScanMode,
   saveSoundEnabled,
@@ -57,11 +53,8 @@ import {
   boxesToMask,
   captureFrameAndRoi,
   cropVideoSpaceRoi,
-  cropVideoSpaceRoiRaw,
   DEFAULT_BARCODE_ROI,
-  DEFAULT_OCR_ENGINE,
   DEFAULT_ROI,
-  isMlKitAvailable,
   isPaddleReady,
   loadPersistedBarcodeRoi,
   loadPersistedRoi,
@@ -72,9 +65,7 @@ import {
   savePersistedRoi,
   trimBarcodeBoxesToStripes,
   type HandleId,
-  type OcrEngineId,
   type OcrFilterMode,
-  type OcrPreprocessOptions,
   type RoiRect,
 } from '../scan/ocr'
 import { useDraggableRoi } from './useDraggableRoi'
@@ -103,11 +94,6 @@ const BarcodeGuardPanel = lazy(() => import('./BarcodeGuardPanel'))
 // チャンクに載せてしまうと、ライセンスを一度も開かない大多数の利用者にまで
 // 起動時のダウンロード・パースの負担がかかる。
 const LicenseSheet = lazy(() => import('./LicenseSheet'))
-
-// OCR設定の比較パネルも同じ理由で別チャンクにする。プリセットごとに何度も
-// recognizeCaptured を呼ぶだけの計測用ツールで、結果カードから明示的に
-// 開くまでは誰も使わないため、エントリーチャンクに含める理由がない。
-const OcrCompareSheet = lazy(() => import('./OcrCompareSheet'))
 
 // 「読み取り済み」通知の連打防止だけに使う短い時間窓（ミリ秒）。追加の可否
 // （＝一覧に同じ値が既にあるか）には一切関与しない。バーコード検出時の
@@ -165,16 +151,6 @@ const FILTER_OPTIONS: { value: OcrFilterMode; label: string }[] = [
   { value: 'raw', label: OCR_FILTER_LABELS.raw },
   { value: 'digits', label: OCR_FILTER_LABELS.digits },
   { value: 'alnum', label: OCR_FILTER_LABELS.alnum },
-]
-
-// 既定エンジン設定（文字モード固有・シャッターの上に置く、撮る前から見えるSelect。
-// 位置の詳細は下のJSX側のコメント参照）の選択肢。ML Kitが実際に動く環境
-// （mlkitAvailable）でだけ表示するため、この配列自体は常に両方持たせておき、
-// レンダー側で出す/出さないを切り替える（環境ごとに別配列を持つと選択肢の文言を
-// 2箇所でメンテすることになるため）。
-const OCR_ENGINE_OPTIONS: { value: OcrEngineId; label: string }[] = [
-  { value: 'mlkit', label: 'ML Kit（速い・既定）' },
-  { value: 'paddle', label: 'PaddleOCR（低速・高精度）' },
 ]
 
 // 「怪しい文字」をタップしたときに切り替える、字形が紛らわしい文字の相互対応表。
@@ -529,11 +505,9 @@ export function SimpleScanScreen() {
   const handleCloseLicenses = useCallback(() => setLicenseOpen(false), [])
 
   const [ocrBusy, setOcrBusy] = useState(false)
-  // どのエンジンで読んだ結果かをここに持たせる。confidence の意味がエンジンで違う
-  // （ML Kitは常に0＝情報が無い、PaddleOCRはCTC由来の本物の値）ため、表示側は
-  // confidenceの値そのものではなく必ずこのengineを見て表示を出し分ける
-  // （types.ts の OcrResult.confidence のコメント参照）。
-  const [ocrInfo, setOcrInfo] = useState<{ ms: number; confidence: number; engine: OcrEngineId } | null>(null)
+  // confidence は PaddleOCR が CTC の確率から算出した本物の値なので、
+  // そのまま画面に出せる（types.ts の OcrResult.confidence のコメント参照）。
+  const [ocrInfo, setOcrInfo] = useState<{ ms: number; confidence: number } | null>(null)
   const [ocrRawText, setOcrRawText] = useState<string | null>(null)
   // 怪しい文字をタップで直した後の文字列（1文字ずつの配列。ocrRawText と同じ並び）。
   // null は「まだ結果が無い」を表す。生テキスト（ocrRawText）そのものは書き換えない
@@ -558,51 +532,10 @@ export function SimpleScanScreen() {
   // シャッターを押した瞬間に確定させた「実際に OCR へ渡す画像」。結果が出たあとも
   // ユーザーが消すか次のシャッターを押すまで表示し続け、同じ画像での再認識にも使う。
   const [capturedImage, setCapturedImage] = useState<ImageData | null>(null)
-  // OCR設定の比較パネル（OcrCompareSheet）の開閉。全画面パネルなので、開いている間は
-  // helpOpen 等と同様にバーコード検出を止める必要がある。専用のオーバーレイフラグを
-  // scanGating.ts に増やす代わりに、既存の ocrResultPanelOpen（結果カード表示中は
-  // バーコード検出を止める、という既存の仕組み）に ocrBusy と一緒に流し込んで扱う
-  // （下の overlaysOpen を参照）。
-  const [compareOpen, setCompareOpen] = useState(false)
-
-  // この端末で ML Kit が実際に使えるか。Capacitor.isNativePlatform() は端末が
-  // ネイティブかどうかという静的な性質で、実行中に変わることは無いため、
-  // マウント時に一度だけ判定すれば十分（毎レンダー呼び直す理由が無い）。
-  // ブラウザ（pnpm dev / GitHub Pages）では常に false になる。以前はこれを見て
-  // シャッターごと無効化していたが、PaddleOCR（WASM・ブラウザでも動く）を
-  // フォールバックとして追加したことで、ブラウザでも文字モードが使えるように
-  // なった（下の defaultOcrEngine・banner の JSX を参照）。
-  const [mlkitAvailable] = useState(isMlKitAvailable)
-
-  // 既定で使うOCRエンジン（文字モード固有・シャッターの上で撮る前から選べる設定。
-  // README「3.5」参照）。
-  // 保存値（前回選んでいた値）を復元するが、これはあくまで「最後に選ばれていた値」
-  // でしかない。ブラウザでは ML Kit がそもそも動かないため、保存値が 'mlkit' で
-  // あっても実際に使うエンジンはここで 'paddle' に読み替える。環境判定はここ
-  // （呼び出し側）に一本化する方針で、prefs.ts の loadOcrEngine のコメントに
-  // 明記してある（保存・読み込みの責務と実行時に使えるかどうかの判定の責務を
-  // 混ぜないため）。
-  const [ocrEnginePref, setOcrEnginePref] = useState<OcrEngineId>(loadOcrEngine)
-  const defaultOcrEngine: OcrEngineId = mlkitAvailable ? ocrEnginePref : 'paddle'
-  const handleChangeOcrEnginePref = useCallback((next: OcrEngineId) => {
-    setOcrEnginePref(next)
-    saveOcrEngine(next)
-  }, [])
-
-  // 直近の認識に実際に使ったエンジン。「同じ画像で再認識」は撮り直しをしない代わりに
-  // エンジンも引き継ぐ（PaddleOCRで読んだ直後にマスク設定だけ変えて再認識したら
-  // ML Kitに戻る、というのは驚きになるため）。ocrInfo.engine と二重持ちに見えるが、
-  // ocrInfo は認識結果が出るまで null（画面表示用）なのに対し、こちらは
-  // runRecognition呼び出しの度に同期的に更新するrefで、handleRetrySameImageから
-  // 常に「直前に使ったエンジン」を取り出せるようにするためのもの。
-  const lastEngineRef = useRef<OcrEngineId>(DEFAULT_OCR_ENGINE)
 
   // 結果カード内だけの設定（このアプリで唯一の設定面）。前回の選択を次回起動時にも
   // 復元する（loadScanMode 等、他の設定の読み方と同じ流儀）。
   const [filterMode, setFilterMode] = useState<OcrFilterMode>(loadOcrFilterMode)
-  // OCR前処理（罫線除去・縞マスク・コントラスト正規化）の組み合わせ。比較モードで
-  // 「この設定を使う」を選ぶまでは既定値（すべてON）のまま。
-  const [preprocessOptions, setPreprocessOptions] = useState<OcrPreprocessOptions>(loadOcrPreprocess)
 
   const previewRef = useRef<HTMLDivElement | null>(null)
 
@@ -788,30 +721,26 @@ export function SimpleScanScreen() {
   }, [mode, ocrBox, barcodeBox])
 
   // この画面に実在するオーバーレイは「OCR結果カード」「使い方パネル」「整形パネル」
-  // 「誤読ガード設定パネル」「OCR設定の比較パネル」の5つ（一覧・確認ダイアログ・
-  // プロファイル選択などはこの画面には存在しない）。isAnyOverlayOpen は汎用の純粋関数
-  // のまま流用し、渡すフラグだけを実在するものに絞る。
+  // 「誤読ガード設定パネル」の4つ（一覧・確認ダイアログ・プロファイル選択などは
+  // この画面には存在しない）。isAnyOverlayOpen は汎用の純粋関数のまま流用し、
+  // 渡すフラグだけを実在するものに絞る。
   // OCR結果カードで止めるのは「認識処理中」だけにする。結果カードはカメラ映像の下に
   // 並ぶだけで視界を塞がないため、表示されている間ずっと検出を止めると
   // 一度 OCR しただけでバーコードが読めなくなってしまう。
-  // 使い方パネル・整形パネル・誤読ガードパネル・比較パネルはどれも全画面表示で
+  // 使い方パネル・整形パネル・誤読ガードパネルはどれも全画面表示で
   // カメラがどこを向いているか分からなくなるため、開いている間は常にバーコード検出を止める。
-  // 比較パネル（compareOpen）専用のフラグは scanGating.ts（触ってはいけないファイル）に
-  // 増やさず、既存の ocrResultPanelOpen（「結果カードで止める」フラグ）に ocrBusy と
-  // OR して流し込む。比較パネルは結果カードから開く付随機能であり、意味的には
-  // 「結果カードまわりの処理中」の延長として扱って差し支えないため。
-  // 誤読ガードパネル（guardPanelOpen）も同じ理由でフラグを増やさず、TrimPanel と
+  // 誤読ガードパネル（guardPanelOpen）はフラグを増やさず、TrimPanel と
   // 「設定項目が多いのでカメラ映像を覆う専用パネルにする」という性質が完全に同じ
   // trimPanelOpen に OR して流し込む。
   const overlaysOpen = useMemo(
     () =>
       isAnyOverlayOpen({
-        ocrResultPanelOpen: ocrBusy || compareOpen,
+        ocrResultPanelOpen: ocrBusy,
         helpOpen,
         trimPanelOpen: trimPanelOpen || guardPanelOpen,
         licenseOpen,
       }),
-    [ocrBusy, compareOpen, helpOpen, trimPanelOpen, guardPanelOpen, licenseOpen],
+    [ocrBusy, helpOpen, trimPanelOpen, guardPanelOpen, licenseOpen],
   )
 
   // バーコード検出を有効にすべきかは isBarcodeScanEnabled（純粋関数）だけで判定する。
@@ -868,18 +797,17 @@ export function SimpleScanScreen() {
   // 消えてしまうトーストだと、後者の「再読み込みが必要」という重要な状態を
   // 5秒で見失ってしまう。
 
-  // 認識前にエンジンが使える状態かを確認する共通ヘルパー。
-  // ML Kit はネイティブプラグインなので「使えるかどうか」は起動時に一度きりの
-  // 静的な判定（mlkitAvailable）で足りるが、PaddleOCRは約35MBのモデル・wasmを
-  // 初回だけ非同期で読み込む必要があり、読み込み中は進捗を利用者に見せたい
-  // （でないと「反応が無い」ように見えて不安になる）。preparePaddle は仕様として
-  // rejectしない（{ ok: true } | { ok: false, error } を返す）ため、ここで
-  // ok: false を握りつぶさずエラートーストで見せて中断する
-  // （README「2. APK版で OCR がまるごと使えなかった」の教訓＝catch {} で黙って
-  // 壊れるのを避ける、という方針に合わせる）。
+  // 認識前にPaddleOCRが使える状態かを確認する共通ヘルパー。
+  // PaddleOCRは約35MBのモデル・wasmを初回だけ非同期で読み込む必要があり、
+  // 読み込み中は進捗を利用者に見せたい（でないと「反応が無い」ように見えて
+  // 不安になる）。preparePaddle は仕様としてrejectしない
+  // （{ ok: true } | { ok: false, error } を返す）ため、ここで ok: false を
+  // 握りつぶさずエラートーストで見せて中断する（README「2. APK版で OCR が
+  // まるごと使えなかった」の教訓＝catch {} で黙って壊れるのを避ける、という
+  // 方針に合わせる）。
   // 既に isPaddleReady() が true（一度読み込み済み）なら、案内を出さずそのまま true を返す。
-  const ensureEngineReady = useCallback(async (engine: OcrEngineId): Promise<boolean> => {
-    if (engine !== 'paddle' || isPaddleReady()) return true
+  const ensureEngineReady = useCallback(async (): Promise<boolean> => {
+    if (isPaddleReady()) return true
     const prepared = await preparePaddle((status) => showToast(status, 'info'))
     if (!prepared.ok) {
       showToast(prepared.error, 'error')
@@ -889,10 +817,7 @@ export function SimpleScanScreen() {
   }, [])
 
   // 実際に認識にかけている ImageData を渡して結果一覧に積む共通処理。
-  // シャッター押下の初回認識・「同じ画像で再認識」・「精密読み取り」のいずれからも呼ぶ。
-  // engine は呼び出し側が明示的に渡す（既定値を持たせない）。「今回はどのエンジンで
-  // 読むか」という決定はここではなく呼び出し側の責務にして、この関数は渡された
-  // エンジンで読んで結果を反映するだけに徹する。
+  // シャッター押下の初回認識・「同じ画像で再認識」のいずれからも呼ぶ。
   //
   // 以前はここに「丁寧に読む」(ocrCareful) がONのときの2パス目（別PSMで再認識し、
   // 食い違いを検出する）ロジックがあったが、ML Kit にはPSMという概念自体が無いため
@@ -900,22 +825,13 @@ export function SimpleScanScreen() {
   // （素の画像 vs コントラスト補正）として作り直すのは別の作業として、ここでは
   // いったん単純な1パスに戻す（compareOcrPasses / mergeVerdicts は agreement.ts に
   // 残してあるので、作り直す際にそのまま使える）。
-  //
-  // isMlKitAvailable() が false（ブラウザ）で engine === 'mlkit' が渡された場合は
-  // recognizeCaptured 自体が分かりやすい日本語エラーで reject する
-  // （scan/ocr/index.ts 参照）ため、ここでは普通に catch すれば済む。もっとも
-  // defaultOcrEngine の計算により、ブラウザでは常に 'paddle' が選ばれるため、
-  // 通常この分岐には来ない（二重の安全策）。
   const runRecognition = useCallback(
-    (image: ImageData, engine: OcrEngineId) => {
+    (image: ImageData) => {
       setOcrBusy(true)
-      // 「同じ画像で再認識」が次に呼ばれたときに引き継げるよう、リクエストの成否を
-      // 待たずに同期的に記録する。
-      lastEngineRef.current = engine
 
-      void recognizeCaptured(image, engine)
+      void recognizeCaptured(image)
         .then((result) => {
-          setOcrInfo({ ms: result.ms, confidence: result.confidence, engine })
+          setOcrInfo({ ms: result.ms, confidence: result.confidence })
           setOcrRawText(result.text)
           setCorrectedChars(Array.from(result.text))
           // 整形ルールは「読み取りを受け付けた瞬間」に確定させる（バーコードの
@@ -942,35 +858,9 @@ export function SimpleScanScreen() {
     [appendResult],
   )
 
-  // 前処理の組み合わせが「3つのフラグすべてOFF」のときは、preprocessRoi の
-  // グレースケール化・縮小すら経ない、本当に手を加えていない画像（cropVideoSpaceRoiRaw）
-  // を使う。preprocessRoi の縮小・グレースケール化は tesseract.js の LSTM に合わせて
-  // 調整したものであり、ML Kit（自然な写真で学習されたモデル）にとってはこの2段階が
-  // 有利に働かない（cropVideoSpaceRoiRaw のコメント参照）。比較パネル（OcrCompareSheet）
-  // の「素の画像」プリセットもこの同じ判定でcropVideoSpaceRoiRawを使っているため、
-  // 比較して「この設定を使う」を押した結果と、実際の撮影時の挙動を一致させる意味もある。
-  const isRawPreprocess = useCallback(
-    (options: OcrPreprocessOptions) => !options.removeRuledLines && !options.maskStripes && !options.normalizeContrast,
-    [],
-  )
-
-  const buildOcrImage = useCallback(
-    (frame: OffscreenCanvas, videoRoi: RoiRect, maskRects: NormalizedRect[] | undefined) => {
-      return isRawPreprocess(preprocessOptions)
-        ? cropVideoSpaceRoiRaw(frame, videoRoi, maskRects)
-        : cropVideoSpaceRoi(frame, videoRoi, maskRects, preprocessOptions)
-    },
-    [isRawPreprocess, preprocessOptions],
-  )
-
   const handleShutterOcr = useCallback(() => {
     if (ocrBox.isDragging) return // 枠をドラッグ中に誤ってシャッターが走らないようにする
     if (helpOpen) return // 使い方パネル表示中は誤操作防止のためOCRを起動しない
-    // 以前はここに「ブラウザ（!mlkitAvailable）では起動しない」という二重防御が
-    // あったが、defaultOcrEngine がブラウザでは常に 'paddle' に読み替わるため、
-    // このボタンが押せる状況で認識自体が成立しないケースはもう無い
-    // （ボタンの disabled も helpOpen だけを見るように変えてある。下の JSX 参照）。
-    const engine = defaultOcrEngine
     const video = camera.videoRef.current
     if (!video || !camera.ready) {
       showToast('カメラの準備ができていません', 'error')
@@ -1005,22 +895,21 @@ export function SimpleScanScreen() {
         const maskRects = trimBarcodeBoxesToStripes(captured.frame, candidates)
         capturedFrameRef.current = { frame: captured.frame, videoRoi: captured.videoRoi, maskRects }
         const useMask = autoMaskEnabled && maskRects.length > 0
-        const image = buildOcrImage(captured.frame, captured.videoRoi, useMask ? maskRects : undefined)
+        const image = cropVideoSpaceRoi(captured.frame, captured.videoRoi, useMask ? maskRects : undefined)
         setCapturedImage(image)
         setMaskedCount(useMask ? maskRects.length : 0)
 
-        // engine が 'paddle'（ブラウザの既定、または利用者が設定で選んだ場合）で
         // まだモデル未読み込みなら、ここで初めて読み込みが走る。約35MBあるため
         // ensureEngineReady 内で進捗をトーストで見せる。読み込みに失敗した場合は
         // ここで中断し、runRecognition（＝ocrBusyを降ろすfinally）を呼ばないので、
         // 自分でocrBusyを降ろす必要がある。
-        const ready = await ensureEngineReady(engine)
+        const ready = await ensureEngineReady()
         if (!ready) {
           setOcrBusy(false)
           return
         }
         // runRecognition は自身の finally で ocrBusy を降ろすので、ここでは降ろさない
-        runRecognition(image, engine)
+        runRecognition(image)
       })
       .catch(() => {
         showToast('画像の取り込みに失敗しました', 'error')
@@ -1030,55 +919,32 @@ export function SimpleScanScreen() {
     ocrBox.isDragging,
     ocrBox.roi,
     helpOpen,
-    defaultOcrEngine,
     camera.videoRef,
     camera.ready,
     detectBoxes,
     autoMaskEnabled,
-    buildOcrImage,
     ensureEngineReady,
     runRecognition,
   ])
 
   // 撮影しなおさず、現在のマスク設定で同じ静止フレームを読み直す
   // （フィルタはここでは無関係）。マスクON/OFFの切り替え後の比較にもこれを使う。
-  // エンジンは lastEngineRef（直前にrunRecognitionへ渡した値）をそのまま引き継ぐ。
-  // 「マスク設定だけ変えたつもりが、いつの間にかML Kitに戻っていた」という
-  // 驚きを避けるための決定（README「UIでの見せ方」参照）。
   const handleRetrySameImage = useCallback(() => {
     const captured = capturedFrameRef.current
     if (!captured) return
-    const engine = lastEngineRef.current
     const maskRects = autoMaskEnabled ? captured.maskRects : []
-    const image = buildOcrImage(captured.frame, captured.videoRoi, maskRects.length > 0 ? maskRects : undefined)
+    const image = cropVideoSpaceRoi(captured.frame, captured.videoRoi, maskRects.length > 0 ? maskRects : undefined)
     setCapturedImage(image)
     setMaskedCount(maskRects.length)
     setOcrBusy(true)
-    void ensureEngineReady(engine).then((ready) => {
+    void ensureEngineReady().then((ready) => {
       if (!ready) {
         setOcrBusy(false)
         return
       }
-      runRecognition(image, engine)
+      runRecognition(image)
     })
-  }, [autoMaskEnabled, buildOcrImage, ensureEngineReady, runRecognition])
-
-  // 「精密読み取り」: 結果カードに今まさに表示している静止画（capturedImage）を、
-  // 撮り直し・再クロップ一切なしでそのまま PaddleOCR にかけ直す。README「3.5」で
-  // 主役に据えている導線で、「ML Kitで読めなかったときに、その場で押せる」ことが
-  // 目的のため、buildOcrImage で作り直したりはせず、今表示中の画像をそのまま渡す。
-  const handlePrecisionOcr = useCallback(() => {
-    if (!capturedImage) return
-    setOcrBusy(true)
-    const image = capturedImage
-    void ensureEngineReady('paddle').then((ready) => {
-      if (!ready) {
-        setOcrBusy(false)
-        return
-      }
-      runRecognition(image, 'paddle')
-    })
-  }, [capturedImage, ensureEngineReady, runRecognition])
+  }, [autoMaskEnabled, ensureEngineReady, runRecognition])
 
   const handleDismissCapturedImage = useCallback(() => {
     setCapturedImage(null)
@@ -1123,22 +989,6 @@ export function SimpleScanScreen() {
       }
       return next
     })
-  }, [])
-
-  // OCR設定の比較パネル（別チャンク）を開く。「同じ画像で再認識」と同じく、
-  // シャッター押下時に確定させた静止フレーム（capturedFrameRef）があるときだけ開ける。
-  const handleOpenCompare = useCallback(() => setCompareOpen(true), [])
-  const handleCloseCompare = useCallback(() => setCompareOpen(false), [])
-
-  // 比較パネルで「この設定を使う」が押されたときに、採用された前処理設定を
-  // 以後のシャッターの既定にする。永続化して次回起動後も引き継ぐ
-  // （比較モードの目的が「現場で実物を試して一番読めた設定を採用する」ことなので、
-  // 決めた設定がアプリを閉じるたびに失われては本末転倒）。
-  // エンジンは ML Kit の1つだけになったため、以前あった psm・engine の受け渡しは
-  // 不要になった（OcrCompareSheet.tsx の onAdopt も preprocess だけを返す）。
-  const handleAdoptCompareSettings = useCallback((nextPreprocess: OcrPreprocessOptions) => {
-    setPreprocessOptions(nextPreprocess)
-    saveOcrPreprocess(nextPreprocess)
   }, [])
 
   // ResultRow へは「呼ぶだけ」の同期的な口として渡すため、ここで await を閉じ込める
@@ -1499,71 +1349,34 @@ export function SimpleScanScreen() {
           成立する（この 600px という数字、もしくは上の各定数を変えるときは、
           この式を書き直して両辺の関係が保たれることを必ず確認すること）。 */}
       <div className="flex min-h-0 max-h-[28vh] flex-col gap-2 overflow-y-auto overscroll-contain border-b border-slate-800 bg-slate-900 p-3">
-        {/* ブラウザ（pnpm dev / GitHub Pages）向けの案内。
-            以前は「ML Kitが使えないため文字モードは使えない」という禁止の警告
-            だったが、PaddleOCR（onnxruntime-web・WASM）をフォールバックとして
-            追加したことで、ブラウザでも文字モード自体は使えるようになった
-            （README「3.5」の「副作用としてWeb版で文字モードが復活した」）。
-            そのためここは「禁止」ではなく「これから何が起きるか」の事前説明に
-            書き換えてある。シャッターは無効化していない（下のボタンの disabled は
-            helpOpen だけを見る）ので、実際に押せば PaddleOCR で読み取りが進む。 */}
-        {mode === 'ocr' && !mlkitAvailable && (
-          <div className="flex items-start gap-2 rounded-lg border border-amber-500/50 bg-amber-950/50 px-3 py-2">
-            <WarningIcon className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
-            <p className="text-[11px] font-semibold leading-relaxed text-amber-200">
-              ブラウザでは ML Kit が使えないため、PaddleOCR（高精度・低速）で読み取ります。
-              初回だけ約35MBの読み込みが走り、ML Kitより認識に時間がかかります。
-            </p>
-          </div>
-        )}
-
         {/* OCR結果カード: 直近の読み取り結果と、抽出フィルタ・バーコード自動除外の
             設定。文字モードだけに属する UI であり、バーコードモードでは
             （処理中の状態が残っていても）表示しない。
-            以前はここに「OCRエンジン」（Tesseract/ML Kit）の切り替え、PSM選択、
-            「丁寧に読む」トグルもあったが、tesseract.js を削除してエンジンが
-            ML Kit の1つだけになったため、選ぶ余地の無いこれらの UI は削除した。
-            その後 PaddleOCR 追加に伴って既定エンジンのSelectを一度ここに復活
-            させたが、「読み取りに成功するまでこのカード自体が出ない＝撮る前に
-            選べない」という欠点があったため、シャッターを押す前から見える
-            文字モード固有の設定（バーコードモードの「読み取り契機」と対になる
-            位置）へ移し、ここからは削除した（README「3.5」参照）。読めなかった
-            直後にその場で切り替える「精密読み取り」ボタンはここに残っている。 */}
+            以前はここに「OCRエンジン」（Tesseract/ML Kit/PaddleOCR）の切り替え、
+            PSM選択、「丁寧に読む」トグル、「精密読み取り」ボタンもあったが、
+            最終的にエンジンをPaddleOCR 1つに絞ったため、選ぶ余地の無いこれらの
+            UI はすべて削除した（README「OCR まわりの修正履歴」参照）。 */}
         {mode === 'ocr' && !ocrBusy && capturedImage && ocrInfo && (
           <div className="flex flex-col gap-2 rounded-lg bg-slate-800 p-2.5">
             {/* 1段目: サムネイルとテキストだけの行。以前はこの行に操作ボタンも
-                並べていたが、「同じ画像で再認識」「精密読み取り」「設定を比較」
-                「×」が全部揃うとボタン側の合計幅（shrink-0）だけで実機の画面幅
-                を超えてしまい、隣の `flex-1 min-w-0` のテキスト列が「潰れて
-                残る」ことを選んだ結果、幅ゼロ近くまで押し潰されて1文字ずつ縦に
-                並ぶ崩れ方をしていた（`flex-wrap` はテキスト列自身の折り返しは
-                助けてくれない）。ボタンをこの行から追い出し、テキスト列の隣に
-                shrink-0 の兄弟を置かないことで、この行は絶対に潰れない。 */}
+                並べていたが、「同じ画像で再認識」「設定を比較」「×」（比較機能は
+                その後削除）が全部揃うとボタン側の合計幅（shrink-0）だけで実機の画面幅を超えてしまい、
+                隣の `flex-1 min-w-0` のテキスト列が「潰れて残る」ことを選んだ結果、
+                幅ゼロ近くまで押し潰されて1文字ずつ縦に並ぶ崩れ方をしていた
+                （`flex-wrap` はテキスト列自身の折り返しは助けてくれない）。
+                ボタンをこの行から追い出し、テキスト列の隣に shrink-0 の兄弟を
+                置かないことで、この行は絶対に潰れない。 */}
             <div className="flex items-center gap-2">
               <div className="shrink-0 overflow-hidden rounded border border-slate-700 bg-black">
                 <CapturedImageCanvas image={capturedImage} className="h-12 w-28 object-contain" />
               </div>
               <div className="min-w-0 flex-1">
-                {/* 以前は「読み取った画像（PaddleOCRで読みました）」とエンジン名を
-                    ここにも書いていたが、すぐ下の行に「PaddleOCR / 202ms / 信頼度 99%」
-                    と同じ情報が出ているため単なる重複であり、行を無駄に長くして
-                    上の崩れを悪化させるだけだった。ラベルは元の「読み取った画像」に
-                    戻し、エンジン名は下の行に一本化する。 */}
                 <p className="text-[10px] text-slate-500">読み取った画像</p>
-                {/* confidence の意味はエンジンで違う（types.ts の OcrResult.confidence参照）。
-                    ML Kit は文字ごと・全体としての信頼度スコアを一切返さず、常に0が入るため、
-                    そのまま「信頼度 0%」と出すと「まったく読めていない」という逆の誤解を
-                    与える。数値は出さず注記だけにする。PaddleOCR は CTC の確率から算出した
-                    本物の値が入るため、こちらは実際の数値をそのまま出す。
-                    「今どっちのエンジンで読んだか分からない」が現場で一番困るため、
-                    ms表示にもエンジン名を添えて明示する。 */}
+                {/* confidence は PaddleOCR が CTC の確率から算出した本物の値なので、
+                    そのまま実数値を出す（types.ts の OcrResult.confidence参照）。 */}
                 <p className="truncate text-[11px] text-slate-300">
-                  {ocrInfo.engine === 'mlkit' ? 'ML Kit' : 'PaddleOCR'} / {ocrInfo.ms}ms
-                  {ocrInfo.engine === 'paddle' && ` / 信頼度 ${Math.round(ocrInfo.confidence)}%`}
+                  PaddleOCR / {ocrInfo.ms}ms / 信頼度 {Math.round(ocrInfo.confidence)}%
                 </p>
-                {ocrInfo.engine === 'mlkit' && (
-                  <p className="truncate text-[10px] text-slate-500">（ML Kitは信頼度を返しません）</p>
-                )}
               </div>
             </div>
 
@@ -1582,31 +1395,6 @@ export function SimpleScanScreen() {
               >
                 同じ画像で再認識
               </button>
-              {/* 「精密読み取り」: README「3.5」で主役に据えている導線。読めなかった
-                  ときに設定を開かせず、その場でPaddleOCRに読み直させる。
-                  今表示している結果がすでにPaddleOCRのものなら押しても無意味なので、
-                  ML Kitで読んだ結果のときだけ出す。 */}
-              {ocrInfo.engine !== 'paddle' && (
-                <button
-                  type="button"
-                  onClick={handlePrecisionOcr}
-                  className="shrink-0 rounded bg-cyan-700 px-2 py-1 text-[11px] font-semibold text-cyan-50 active:bg-cyan-600"
-                >
-                  精密読み取り
-                </button>
-              )}
-              {/* 比較モードは「今の静止フレーム」に対して設定違いを並べて試す機能なので、
-                  シャッター押下時点のフレーム一式（capturedFrameRef）が残っているとき
-                  だけ開けるようにする（「読み取り結果を閉じる」を押すと消える）。 */}
-              {capturedFrameRef.current && (
-                <button
-                  type="button"
-                  onClick={handleOpenCompare}
-                  className="shrink-0 rounded bg-slate-700 px-2 py-1 text-[11px] font-semibold text-slate-100 active:bg-slate-600"
-                >
-                  設定を比較
-                </button>
-              )}
               <button
                 type="button"
                 onClick={handleDismissCapturedImage}
@@ -1682,15 +1470,6 @@ export function SimpleScanScreen() {
               label="バーコードを自動で除外"
               hint="枠内で検出したバーコードを塗りつぶしてから読み取ります。OFFにして「同じ画像で再認識」を押すと塗りつぶさずに読み直せます。"
             />
-
-            {/* 既定エンジンのSelectは以前ここ（結果カードの末尾）にあったが、
-                「シャッターを押す前から見える文字モード固有の設定」（バーコードモードの
-                「読み取り契機」と対になる位置）へ移した。読み取りに一度成功しないと
-                このカード自体が表示されず、ML Kitで読む前にPaddleOCRを選んでおく、
-                ということができなかったため（README「3.5」参照）。同じ設定を
-                2箇所に残すと現場が混乱するので、ここには置かない。読めなかった
-                直後にその場で切り替えたいだけなら、すぐ上の「精密読み取り」ボタンが
-                主役のまま変わらず残っている。 */}
           </div>
         )}
 
@@ -1748,44 +1527,6 @@ export function SimpleScanScreen() {
           </div>
         )}
 
-        {/* OCRエンジンの選択（文字モード固有。バーコードモードの「読み取り契機」と
-            対になる位置に置く）。
-            以前はこのSelectが結果カードの中にしか無く、**一度読み取りに成功しないと
-            表示されない**という欠点があった。つまり「ML Kitで読む前にPaddleOCRを
-            選んでおく」ができなかった（現場要望: 既定はML Kitのままでよいが、
-            読む前にPaddleOCRを選べるようにしたい）。シャッターを押す前から常に見える
-            この位置へ移すことで、この欠点を解消する。
-            置き場所の判断: README冒頭の「設定は上、その場の操作は下」に従うと、
-            エンジン選択は「一度決めたらしばらく変えない設定」なのでシャッター
-            （その場の操作）より上に置くべきだが、バーコードの「枠内のみ」等と違って
-            **OCR専用の設定**なので、両モード共通の設定バー（画質・整形）ではなく、
-            バーコード固有ブロックと対になる「文字モード固有」の位置に置く。
-            同じ設定を結果カードにも残すと設定が2箇所に増えてしまう
-            （整形ルールをバーコード・OCRで1つに統合したのと同じ理由でこのリポジトリが
-            避けている状態）ため、結果カード側にあった同じSelectは削除した
-            （README「3.5」参照）。「精密読み取り」ボタンは読めなかった直後にその場で
-            押す導線として結果カードにそのまま残っている。
-            ブラウザ（!mlkitAvailable）ではML Kitがそもそも動かず
-            （defaultOcrEngineが常に'paddle'へ読み替わる）、選べても選んだ通りには
-            動かないという混乱を招くだけなので、結果カード側にあった時と同じ基準で
-            ここでも表示自体をしない。 */}
-        {mode === 'ocr' && mlkitAvailable && (
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-2 text-[11px]">
-              <span className="shrink-0 font-semibold text-slate-400">エンジン</span>
-              <Select
-                className="min-h-8 flex-1 text-[11px]"
-                value={ocrEnginePref}
-                onChange={(e) => handleChangeOcrEnginePref(e.target.value as OcrEngineId)}
-                options={OCR_ENGINE_OPTIONS}
-                aria-label="文字認識に使うOCRエンジン"
-              />
-            </div>
-            <p className="pl-[3.25rem] text-[10px] text-slate-500">
-              次にシャッターを押したときに使うエンジンです（選択は次回起動時も記憶されます）。読めなかったときにその場だけ切り替えたいなら、結果カードの「精密読み取り」の方が手早いです。
-            </p>
-          </div>
-        )}
         </div>
 
       {/* シャッター行。ルート直下の兄弟（`shrink-0`）として上のコントロール
@@ -1869,9 +1610,8 @@ export function SimpleScanScreen() {
               variant="primary"
               size="lg"
               loading={ocrBusy}
-              // 以前はブラウザ（!mlkitAvailable）で無効化していたが、defaultOcrEngine が
-              // ブラウザでは常に 'paddle' に読み替わるため、押して認識自体が失敗する
-              // 状況はもう無い（PaddleOCR未読み込みなら handleShutterOcr 内の
+              // PaddleOCRはブラウザでもAPKでも同じように動くため、環境を理由に
+              // 無効化する必要はない（未読み込みなら handleShutterOcr 内の
               // ensureEngineReady が読み込んでから進める）。押せない理由として
               // 残っているのは「使い方パネルを開いている間」の誤操作防止だけ。
               disabled={helpOpen}
@@ -1999,33 +1739,6 @@ export function SimpleScanScreen() {
         </Suspense>
       )}
 
-      {/* OCR設定の比較パネル。別チャンクなので、開くまでは読み込まれない。
-          capturedFrameRef.current が無い（＝まだ一度もシャッターを押していない、
-          または「読み取り結果を閉じる」で消した後）状態では開けない
-          （結果カード側の「設定を比較」ボタンも同じ条件で出し分けている）。 */}
-      {compareOpen && capturedFrameRef.current && (
-        <Suspense
-          fallback={
-            <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950">
-              <SpinnerIcon className="h-8 w-8 text-slate-400" />
-            </div>
-          }
-        >
-          <OcrCompareSheet
-            frame={capturedFrameRef.current.frame}
-            videoRoi={capturedFrameRef.current.videoRoi}
-            maskRects={capturedFrameRef.current.maskRects}
-            // 比較モードは「今この画面が実際に使っている既定エンジン」で走らせる。
-            // ブラウザなら常に'paddle'、APKなら利用者が選んだ既定値（ocrEnginePref）。
-            // lastEngineRef（「精密読み取り」等でその場だけ変えたエンジン）は使わない
-            // ——比較は「これから毎回使う設定」を検証する道具なので、一時的な
-            // 寄り道であるlastEngineRefに引きずられると比較の意味がぶれるため。
-            engine={defaultOcrEngine}
-            onClose={handleCloseCompare}
-            onAdopt={handleAdoptCompareSettings}
-          />
-        </Suspense>
-      )}
     </div>
   )
 }

@@ -8,7 +8,9 @@ import { markNeedRefresh } from './ui/components/updateBus'
 
 // 現在の画面は結果をメモリ上にしか保持しない（意図的にIndexedDBへ永続化しない）ため、
 // ストレージ永続化保護（navigator.storage.persist()）を要求する意味がない。
-// store/storagePersistence.ts 自体は削除せず、再配線時のために残してある。
+// 以前はこの用途のための store/storagePersistence.ts を「再配線時のために残す」
+// 前提で保持していたが、src/store/ 自体を削除したため今はもう存在しない
+// （必要になれば git 履歴から復元できる）。
 
 // オフライン利用のため Service Worker を登録する。
 // registerType: 'prompt'（vite.config.ts）のため、新しいバージョンが見つかっても

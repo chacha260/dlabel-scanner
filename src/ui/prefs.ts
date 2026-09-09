@@ -3,8 +3,6 @@
 
 import type { CaptureQuality } from '../camera/quality'
 import type { OcrFilterMode } from '../scan/ocr/postprocess'
-import { DEFAULT_OCR_PREPROCESS_OPTIONS, type OcrPreprocessOptions } from '../scan/ocr/preprocess'
-import { DEFAULT_OCR_ENGINE, type OcrEngineId } from '../scan/ocr/types'
 import type { BarcodeTriggerMode, ScanMode } from '../scan/scanGating'
 import { DEFAULT_BARCODE_TRIGGER_MODE } from '../scan/scanGating'
 import { DEFAULT_TRIM_RULES, type TrimRules } from '../scan/barcode/trim'
@@ -85,91 +83,19 @@ export function saveOcrFilterMode(mode: OcrFilterMode): void {
   }
 }
 
-// 注意: 以前はここに「丁寧に読む」(ocrCareful: PSMを変えて2パス認識する設定)と
-// 「OCRエンジン選択」(ocrEngine: tesseract / mlkit)の保存関数があったが、
-// どちらも tesseract.js の削除に伴って意味を失ったため削除した。
+// 注意: 以前はここに「丁寧に読む」(ocrCareful: PSMを変えて2パス認識する設定)、
+// 「OCRエンジン選択」(ocrEngine: tesseract / mlkit / paddle)、
+// 「OCR前処理」(ocrPreprocess: 罫線除去・縞マスク・コントラスト正規化の各段ON/OFF、
+// 比較パネル OcrCompareSheet が使っていた設定)の保存関数があったが、いずれも
+// 不要になったため削除した。
 // - ocrCareful は「2回目にPSMを変える」実装だったため、PSM自体が無い ML Kit
-//   単独構成では成立しない（前処理を変えた2パスとして作り直すのは別の作業）。
-// - ocrEngine はエンジンが ML Kit の1つだけになったため選択の余地が無い。
-//
-// その後 PaddleOCR（高精度・低速のフォールバック）を追加したことで、再びエンジンを
-// 選ぶ余地ができたため、下の loadOcrEngine/saveOcrEngine として復活させている。
-// ただし位置づけは以前とまったく違う: 以前は「精度がほぼ同じ2エンジンからどちらを
-// 使うか」という選択だったが、今回は「速い既定（ML Kit）を基本にしつつ、常用したい
-// 人だけがここで既定を変えられる」という控えめな設定にすぎない。主役はあくまで
-// 結果カードの「精密読み取り」ボタン（その場でPaddleOCRに読み直す導線）であり、
-// この設定はそれとは別に「毎回PaddleOCRで読みたい」という運用のためのもの。
-const OCR_ENGINE_STORAGE_KEY = 'dlabel.ocrEngine'
-
-/**
- * 既定で使うOCRエンジン。保存値が無い・壊れている場合は DEFAULT_OCR_ENGINE
- * （'mlkit'）にフォールバックする。
- *
- * 注意: ブラウザ（isMlKitAvailable() が false）では ML Kit がそもそも動かないため、
- * ここで 'mlkit' が返ってきても、呼び出し側（SimpleScanScreen.tsx）は
- * isMlKitAvailable() を見て実際に使うエンジンを 'paddle' に読み替える。
- * ここでは「最後に選ばれていた値」をそのまま返すだけにして、環境判定は
- * 呼び出し側に一本化する（保存・読み込みの責務と、実行時に使えるかどうかの
- * 判定の責務を混ぜないため）。
- */
-export function loadOcrEngine(): OcrEngineId {
-  try {
-    const raw = localStorage.getItem(OCR_ENGINE_STORAGE_KEY)
-    return raw === 'mlkit' || raw === 'paddle' ? raw : DEFAULT_OCR_ENGINE
-  } catch {
-    // プライベートブラウジング等で読めなくても既定値（ML Kit）で動作させる
-    return DEFAULT_OCR_ENGINE
-  }
-}
-
-export function saveOcrEngine(engine: OcrEngineId): void {
-  try {
-    localStorage.setItem(OCR_ENGINE_STORAGE_KEY, engine)
-  } catch {
-    // 保存できなくても致命的ではないため無視する
-  }
-}
-
-const OCR_PREPROCESS_STORAGE_KEY = 'dlabel.ocrPreprocess'
-
-// 保存値の形を信用せず、OcrPreprocessOptions として妥当な形かどうかを1フィールドずつ
-// 確かめる（isValidTrimRules と同じ流儀。他バージョンのアプリや手動編集で
-// 壊れている可能性があるため）。
-function isValidOcrPreprocessOptions(value: unknown): value is OcrPreprocessOptions {
-  if (value === null || typeof value !== 'object') return false
-  const v = value as Record<string, unknown>
-  return (
-    typeof v.removeRuledLines === 'boolean' &&
-    typeof v.maskStripes === 'boolean' &&
-    typeof v.normalizeContrast === 'boolean'
-  )
-}
-
-/**
- * OCR前処理（罫線除去・縞マスク・コントラスト正規化）の各段ON/OFF。比較モード
- * （OcrCompareSheet）で「この設定を使う」を選んだ組み合わせを、次回のシャッターにも
- * 引き継ぐために永続化する。保存値が無い・壊れている場合は
- * DEFAULT_OCR_PREPROCESS_OPTIONS（すべてON、従来からの唯一の挙動）にフォールバックする。
- */
-export function loadOcrPreprocess(): OcrPreprocessOptions {
-  try {
-    const raw = localStorage.getItem(OCR_PREPROCESS_STORAGE_KEY)
-    if (raw === null) return DEFAULT_OCR_PREPROCESS_OPTIONS
-    const parsed: unknown = JSON.parse(raw)
-    return isValidOcrPreprocessOptions(parsed) ? parsed : DEFAULT_OCR_PREPROCESS_OPTIONS
-  } catch {
-    // プライベートブラウジング等で読めない・壊れている場合は既定値（すべてON）で動作させる
-    return DEFAULT_OCR_PREPROCESS_OPTIONS
-  }
-}
-
-export function saveOcrPreprocess(options: OcrPreprocessOptions): void {
-  try {
-    localStorage.setItem(OCR_PREPROCESS_STORAGE_KEY, JSON.stringify(options))
-  } catch {
-    // 保存できなくても致命的ではないため無視する
-  }
-}
+//   以降の構成では成立しない（前処理を変えた2パスとして作り直すのは別の作業）。
+// - ocrEngine は tesseract.js → ML Kit → PaddleOCR と実機比較を重ねた末に
+//   PaddleOCR 一本に絞ったため（README「OCR まわりの修正履歴」参照）、
+//   選ぶ余地そのものが無くなった。
+// - ocrPreprocess は、その前処理パイプライン自体（src/scan/ocr/preprocess.ts）と
+//   比較パネル（OcrCompareSheet.tsx）を丸ごと削除したため、保存する対象が
+//   無くなった。
 
 const SOUND_STORAGE_KEY = 'dlabel.soundEnabled'
 

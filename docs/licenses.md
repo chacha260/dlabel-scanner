@@ -12,9 +12,9 @@ Service Worker のキャッシュにより電波の無い場所でも動作し�
 ついて」を参照）。
 
 一方で、このアプリは React・zxing-wasm（バーコード読み取りエンジン）・
-Google ML Kit（OCRエンジン）など、複数のOSSライブラリ／ライブラリ由来の
-配布物を利用しており、それぞれのライセンス（MIT・Apache-2.0 など）は
-著作権表示・ライセンス本文の同梱を求めています。
+PaddleOCR / onnxruntime-web（OCRエンジン）など、複数のOSSライブラリ／
+ライブラリ由来の配布物を利用しており、それぞれのライセンス（MIT・
+Apache-2.0 など）は著作権表示・ライセンス本文の同梱を求めています。
 
 「ライセンス情報は各ライブラリの GitHub ページを見てください」という
 外部リンク方式は、通信できない前提のこのアプリでは実質的に「ライセンス情報を
@@ -47,8 +47,9 @@ pnpm run licenses
    「ライセンス本文ファイルが同梱されていません」という日本語の注記を
    入れます。
 3. npm の依存解決には出てこないが実際のビルド成果物に含まれる配布物
-   （Android のネイティブ依存として組み込まれる ML Kit など）向けの
-   手書きエントリ（4章参照）をマージします。
+   （`public/vendor/` に手動配置している PaddleOCR のモデル・辞書、
+   onnxruntime-web の wasm、zxing-wasm が内部に同梱する zxing-cpp の
+   wasm など）向けの手書きエントリ（4章参照）をマージします。
 4. 名前順にソートし、TypeScript モジュールとして書き出します。
 
 **再生成が必要なタイミング**: `dependencies`（`package.json`）を
@@ -105,22 +106,20 @@ pnpm run licenses:check
 Web Worker 本体・tesseract.js-core の WebAssembly 本体・Tesseract OCR の
 英語学習済みモデル）の説明があった。tesseract.js を完全に削除した時点で
 `public/vendor/` 自体が無くなり、この節の内容も一度はその旨に書き換えていたが、
-その後 PaddleOCR（読めないとき用の高精度・低速な2つ目のOCRエンジン。
-[README「3.5」](../README.md#35-読めないとき用に-paddleocr-を追加高精度低速)
-を参照）を追加したことで `public/vendor/` は次の構成で復活している。
+その後 PaddleOCR（読めないとき用の高精度・低速な2つ目のOCRエンジンとして
+追加し、その後の実機比較で ML Kit より高精度と分かったため、最終的に
+唯一のOCRエンジンとして一本化した。README「3.5」「9」を参照）を追加した
+ことで `public/vendor/` は次の構成で復活している。
 
 - `public/vendor/paddleocr/`（PP-OCRv5 mobile の検出・認識 ONNX モデル2つ＋文字辞書）
 - `public/vendor/onnxruntime/`（onnxruntime-web の wasm 本体＋JSグルー）
 
-現在、手書きで補っているのは次の3件です。
+現在、手書きで補っているのは次の3件です。以前は Google ML Kit Text
+Recognition v2（Android のネイティブ依存として APK に静的リンクされ、
+npm の依存ツリーには一切現れないため手書きで補っていたもの）もここに
+含まれていましたが、ML Kit 自体を削除したため、このエントリも削除して
+います。
 
-- **Google ML Kit Text Recognition v2** — npm パッケージではなく、
-  Android のネイティブ依存（Gradle の `com.google.mlkit:text-recognition`）
-  として APK に静的リンクされます。`pnpm ls` の依存ツリーにはそもそも
-  現れない（JavaScript側のラッパーである `@capacitor-mlkit/text-recognition`
-  自体は npm パッケージとして自動収集の対象になっています）にもかかわらず、
-  実際のビルド成果物（APK）には確実に含まれるOCRエンジン本体なので、
-  漏らさず手書きで補っています。
 - **zxing-cpp（`zxing_reader.wasm`）** — npm パッケージ `zxing-wasm` が
   内部に同梱している `zxing_reader.wasm` は、zxing-wasm 自体のコードでは
   なく、C++製バーコード読み取りライブラリ zxing-cpp を WebAssembly に
@@ -138,9 +137,10 @@ Web Worker 本体・tesseract.js-core の WebAssembly 本体・Tesseract OCR の
   性質のものではなく、`onnxruntime-node` で実際にロード・推論して健全性を
   確認していますが（`scripts/smoke-paddle.mjs` に検証手順と結果を残してある）、
   広く使われている配布元ではない点は把握しておく必要があります（詳細は
-  README「3.5」の「モデルの出所について」を参照）。onnxruntime-web 本体は
-  npm パッケージとして自動収集の対象になっているため、ここで手書きするのは
-  モデル・辞書のみです。
+  README「3.5」の「モデルの出所について」を参照）。
+- **ONNX Runtime Web（同梱wasm）** — onnxruntime-web 本体は npm パッケージ
+  として自動収集の対象になっていますが、`public/vendor/onnxruntime/` へ
+  自前配信のためコピーしている wasm 本体は別途手書きで補っています。
 
 これらはいずれも `pnpm ls` の依存ツリーには出てこない（=
 `scripts/generate-licenses.mjs` の自動収集では検出できない）にもかかわらず、

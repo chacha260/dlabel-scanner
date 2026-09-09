@@ -1,10 +1,15 @@
 // 新しいバージョンの Service Worker が見つかったときだけ表示する非ブロッキングのバー。
 // ユーザーが「更新」を押すまでは絶対にリロードしない
 // （スキャン中に無警告でリロードされて作業中のデータを失うことを防ぐため）。
-// 「更新」を押したときは、リロード前に必ず下書きを保存し切ってから反映する。
+//
+// 以前はここで、リロード前に IndexedDB へ「組み立て中の下書き」を保存し切る
+// flushPendingDraft()（store/draft.ts）を呼んでいた。これは src/ui/legacy/ScanScreen.tsx
+// が registerDraftFlush() で自分の保存関数を登録していたときだけ意味を持つ配線で、
+// 現在の唯一の画面（SimpleScanScreen.tsx）は結果をメモリ上にしか保持せず
+// （意図的な仕様）登録を一切行わない。src/parse・src/store・src/export を丸ごと
+// 削除したのに合わせて、この画面が呼ぶ意味を失った配線ごと削除した。
 
 import { useEffect, useState } from 'react'
-import { flushPendingDraft } from '../../store/draft'
 import { Button } from './Button'
 import { applyUpdate, dismissUpdate, getNeedRefresh, subscribeUpdate } from './updateBus'
 
@@ -16,14 +21,16 @@ export function UpdateBanner() {
 
   if (!needRefresh) return null
 
+  // applyUpdate は成功すると即座にページをリロードするため、この後
+  // setUpdating(false) をしても意味は無い（コンポーネントごと消える）が、
+  // 万一リロードされない経路が将来入っても「更新中」表示が残り続けない
+  // よう finally で戻しておく。
   async function handleUpdate() {
     setUpdating(true)
     try {
-      // 更新中にスキャン画面が組み立て中のデータを持っていても失われないよう、
-      // リロードの直前に必ず下書きを保存し切る。
-      await flushPendingDraft()
-    } finally {
       await applyUpdate()
+    } finally {
+      setUpdating(false)
     }
   }
 

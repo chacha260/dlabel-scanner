@@ -195,13 +195,12 @@ const pwaPlugin = VitePWA({
     maximumFileSizeToCacheInBytes: 25 * 1024 * 1024,
     runtimeCaching: [
       {
-        // PaddleOCR を初めて使ったときにだけ取得し、以降はオフラインで再利用する。
-        // APK 版ではアセットが端末内に同梱されているのでそもそも Service Worker は
-        // 無効（PACKAGED ビルドでは vite-plugin-pwa ごと外す）だが、Web 版で
-        // PaddleOCR を使う場合はこれが効く。
-        // なお ML Kit と違い PaddleOCR は onnxruntime-web（WASM）で動くため、
-        // ブラウザでも動作する。つまり Web 版でも文字モードが（PaddleOCR に
-        // 切り替えれば）使えるようになる。
+        // PaddleOCR（唯一のOCRエンジン）を初めて使ったときにだけ取得し、
+        // 以降はオフラインで再利用する。APK 版ではアセットが端末内に同梱されて
+        // いるのでそもそも Service Worker は無効（PACKAGED ビルドでは
+        // vite-plugin-pwa ごと外す）だが、Web 版ではこれが効く。
+        // PaddleOCR は onnxruntime-web（WASM）で動くため、ブラウザでも
+        // APK 版と同じように文字モードが使える。
         urlPattern: /\/vendor\/(paddleocr|onnxruntime)\//,
         handler: 'CacheFirst',
         options: {

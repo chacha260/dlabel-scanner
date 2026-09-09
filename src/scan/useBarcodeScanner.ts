@@ -39,7 +39,6 @@
 // トラッカー（agreement.ts）に分離してある。
 
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
-import type { RawScan } from '../parse/types'
 import {
   createBarcodeAgreementTracker,
   createBarcodeReader,
@@ -58,6 +57,17 @@ import { computeDownscaledSize } from './barcode/scale'
 // 持ち込まない）。
 import { mapCoverRectToVideo } from './ocr/geometry'
 import type { RoiRect } from './ocr/types'
+
+// バーコード1件ぶんの生の読み取り値。以前は src/parse/types.ts（フィールド振り分け
+// エンジン向けの型定義）に置いていたが、そのパースエンジン自体を削除したため、
+// 実際にこの型を生成する唯一の場所であるこのフックへ移した
+// （SimpleScanScreen.tsx の onScan コールバックもここから import する）。
+export type RawScan = {
+  value: string
+  source: 'barcode' | 'ocr' | 'manual'
+  format?: string // 例: 'code_128'
+  at: number // epoch ms
+}
 
 export type UseBarcodeScannerOptions = {
   videoRef: RefObject<HTMLVideoElement | null>

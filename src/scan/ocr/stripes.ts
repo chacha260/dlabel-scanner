@@ -131,17 +131,21 @@ export function findDenseBand(counts: number[], relativeThreshold = 0.4): Band |
 }
 
 // ============================================================================
-// ROI 全体スキャン（デコード可否に依存しない縞マスク）
+// countRowTransitions（trimBarcodeBoxesToStripes を支える走査線ヘルパー）
 // ============================================================================
 //
 // 以下は元々 preprocess.ts にあった「検出済みバーコード枠の内側だけを見て縦方向に
 // 縮める」ロジック（trimOneBoxToStripeBand、上記参照）を下支えする countRowTransitions
-// を切り出したものと、それを ROI 全体・縦横両方向に広げた detectStripeRegion。
+// を切り出したもの。
 //
-// trimBarcodeBoxesToStripes は「BarcodeDetector がデコードできた枠」の内側しか
-// 見ないため、ROI の端で切れてデコードできなかったバーコードは素通りしてしまう。
-// detectStripeRegion はデコード結果と無関係に、ROI の画素そのものから縞の密集領域を
-// 探すため、そのような取りこぼしにも対応できる。
+// 以前はここに、ROI全体・縦横両方向に検索範囲を広げた detectStripeRegion（と
+// それが使う countColTransitions・型 StripeRegion）もあった。これは
+// trimBarcodeBoxesToStripes と違い「BarcodeDetector がデコードできた枠」に
+// 依存せず、ROI の画素そのものから縞の密集領域を探す機能で、OCR前処理
+// パイプラインの「縞マスク」オプション（削除済み）だけが呼び出していた。
+// その呼び出し元が無くなり、自分自身のユニットテストからしか呼ばれない
+// 状態になったため、利用者の判断で削除した（必要になれば git 履歴から
+// 復元できる）。
 
 // 走査線ごとのヒステリシスしきい値を、その行/列自身の輝度レンジから求めるための係数。
 // 中央値 ±（レンジの10%）を「不感帯」とする。値が大きいほどノイズに強くなる代わりに、
@@ -184,91 +188,3 @@ export function countRowTransitions(data: Uint8ClampedArray, rowOffsetPx: number
   return countTransitions(rowLuma, low, high)
 }
 
-/**
- * countRowTransitions の列方向版。列 x について、行 rowStart から count 行分だけを
- * 縦に走査してヒステリシス反転回数を数える。2次元シンボル（QR・DataMatrix）の
- * 検出のために、行方向の密な帯が見つかった範囲内だけを縦に見る、という使い方を
- * 想定している（detectStripeRegion を参照）。
- *
- * colLuma は呼び出し側が使い回す作業用バッファ（長さ count 以上）。
- */
-export function countColTransitions(
-  data: Uint8ClampedArray,
-  x: number,
-  w: number,
-  rowStart: number,
-  count: number,
-  colLuma: Uint8ClampedArray,
-): number {
-  let min = 255
-  let max = 0
-  for (let i = 0; i < count; i++) {
-    const y = rowStart + i
-    const o = (y * w + x) * 4
-    const v = luma(data, o)
-    colLuma[i] = v
-    if (v < min) min = v
-    if (v > max) max = v
-  }
-  const span = max - min
-  // countRowTransitions と同じ理由（コメント参照）: 列が完全にフラットなら
-  // 反転はゼロのはずなので、低/高しきい値が同じ値に潰れる前に先に0を返す。
-  if (span <= 0) return 0
-  const mid = (min + max) / 2
-  const low = mid - span * HYSTERESIS_BAND_RATIO
-  const high = mid + span * HYSTERESIS_BAND_RATIO
-  return countTransitions(colLuma, low, high)
-}
-
-/**
- * ROI 全体（デコードの成否と無関係）に対して縞の密集領域を探す。
- *
- * まず行方向に countRowTransitions を全行に対して行い、findDenseBand で
- * 「反転が密な行の帯」を探す（rows）。見つからなければ ROI に縞は無いとみなし
- * null を返す。
- *
- * 見つかった行の帯の範囲内だけを対象に、今度は列方向に countColTransitions を
- * 全列に対して行い、同じく findDenseBand で「反転が密な列の帯」を探す（cols）。
- * この列方向スキャンを行の帯の範囲だけに絞るのは、1次元バーコードと2次元
- * シンボルを見分けるため:
- * - 1次元バーコードのバーは縦方向に伸びる棒なので、行の帯の範囲内を縦に
- *   走査しても同じバーの中を通り続けるだけで反転がほとんど起きない
- *   （cols は見つからない = null）。
- * - 2次元シンボル（QR・DataMatrix）はモジュールが縦横ランダムに並ぶため、
- *   行の帯の範囲内を縦に走査すると反転が多く起きる（cols が見つかる）。
- * これは stripes.ts 冒頭・trimOneBoxToStripeBand のコメントで説明している
- * 「1次元バーコードは横方向にはトリムしない」という既存の前提と整合する。
- *
- * 戻り値の rows / cols はどちらも ROI ローカルの行・列インデックス（0起点）。
- * 呼び出し側（preprocess.ts）はこれをそのまま矩形の塗りつぶし範囲として使える
- * （cols が null の場合は幅いっぱいを塗る＝1次元バーコード相当の扱い）。
- *
- * data が空・w/h が0以下などの退化した入力でも例外を投げず null を返す。
- */
-export type StripeRegion = { rows: Band; cols: Band | null }
-
-export function detectStripeRegion(data: Uint8ClampedArray, w: number, h: number): StripeRegion | null {
-  if (!data || data.length === 0 || !Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null
-
-  const safeW = Math.floor(w)
-  const safeH = Math.floor(h)
-
-  const rowLuma = new Uint8ClampedArray(safeW)
-  const rowCounts: number[] = new Array(safeH)
-  for (let y = 0; y < safeH; y++) {
-    rowCounts[y] = countRowTransitions(data, y * safeW, safeW, rowLuma)
-  }
-
-  const rowBand = findDenseBand(rowCounts)
-  if (!rowBand) return null
-
-  const bandHeight = rowBand.end - rowBand.start + 1
-  const colLuma = new Uint8ClampedArray(bandHeight)
-  const colCounts: number[] = new Array(safeW)
-  for (let x = 0; x < safeW; x++) {
-    colCounts[x] = countColTransitions(data, x, safeW, rowBand.start, bandHeight, colLuma)
-  }
-  const colBand = findDenseBand(colCounts)
-
-  return { rows: rowBand, cols: colBand }
-}

@@ -88,8 +88,9 @@ export type ScanGateInputs = {
   mode: ScanMode
   /**
    * バーコードの読み取り契機。省略時は 'continuous'（＝従来通りの常時読み取り）として扱う。
-   * 省略可能にしてあるのは、モード分割前から存在する画面（src/ui/legacy/ScanScreen.tsx）が
-   * この軸を持たないまま従来の挙動で動き続けられるようにするため。
+   * 省略可能にしてあるのは、モード分割前から存在した画面（旧 src/ui/legacy/ScanScreen.tsx。
+   * 利用者の判断で削除済み）がこの軸を持たないまま従来の挙動で動き続けられるように
+   * していた名残り。
    */
   triggerMode?: BarcodeTriggerMode
   /**

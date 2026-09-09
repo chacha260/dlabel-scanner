@@ -15,7 +15,6 @@
     "licenses:check": "node scripts/generate-licenses.mjs --check"
   },
   "dependencies": {
-    "@capacitor-mlkit/text-recognition": "^8.2.0",
     "@capacitor/android": "^8.5.1",
     "@capacitor/core": "^8.5.1",
     "@capacitor/filesystem": "^8.1.3",

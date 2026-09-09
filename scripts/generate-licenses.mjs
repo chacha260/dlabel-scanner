@@ -186,12 +186,15 @@ function buildEntryFromPackageDir(name, version, dir) {
 // 以前はここに public/vendor/tesseract/ 以下（tesseract.js の worker.min.js・
 // tesseract.js-core の wasm 一式・tessdata_best の英語学習データ）の
 // 手書きエントリもあったが、tesseract.js を完全に削除し public/vendor 自体が
-// 無くなったため削除した。
+// 無くなったため削除した。その後 ML Kit を追加した際に Google ML Kit Text
+// Recognition v2（Android のネイティブ依存として APK に静的リンクされ、pnpm の
+// 依存解決には出てこないため手書きで補っていたもの）の項目が増えたが、
+// PaddleOCR への一本化にあわせて ML Kit 自体を削除したため、このエントリも
+// 削除した。
 //
 // 現在ここに残っているのは:
-//   - Google ML Kit Text Recognition v2 … Android のネイティブ依存として
-//     APK に静的リンクされ、pnpm の依存解決には出てこない（Gradle 依存のため）
 //   - zxing-wasm 同梱の zxing_reader.wasm … zxing-cpp（Apache-2.0）由来
+//   - PaddleOCR / onnxruntime-web の同梱物（下記、Apache-2.0 / MIT）
 //
 // 本文は各プロジェクトが採用している Apache License 2.0 の正式な全文
 // （どのプロジェクトも同一の定型文）をそのまま収録する。
@@ -451,36 +454,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.`,
-  },
-  {
-    // ML Kit は npm パッケージ（@capacitor-mlkit/text-recognition）とは別に、
-    // Android のネイティブ依存（com.google.mlkit:text-recognition）として
-    // APK の中に取り込まれる。Gradle の依存であって pnpm の依存解決には
-    // まったく出てこないため、このスクリプトの自動収集では拾えない。
-    // しかし文字認識モデルごと APK に同梱されて実際に配布物へ含まれるため、
-    // ライセンス表記の対象から漏らすわけにはいかない。手書きで補う。
-    name: 'Google ML Kit Text Recognition v2 (Android)',
-    version: 'com.google.mlkit:text-recognition 16.0.1',
-    spdx: 'Apache-2.0（ライブラリ）/ Google APIs 利用規約（モデル）',
-    author: 'Google LLC',
-    homepage: 'https://developers.google.com/ml-kit/vision/text-recognition/v2',
-    licenseText: `【同梱物について】
-OCRエンジンの1つとして、Google ML Kit の文字認識（Text Recognition v2）を
-Android のネイティブ依存 com.google.mlkit:text-recognition として APK に
-同梱しています。これは「bundled」構成であり、認識モデルがビルド時にアプリへ
-静的リンクされるため、実行時にモデルをダウンロードしません（この APK が
-INTERNET 権限を持たないまま動作できるのはこのためです）。
-
-npm パッケージではなく Gradle の依存であるため pnpm の依存解決には現れず、
-このエントリは手書きで追加しています。JavaScript 側のラッパーである
-@capacitor-mlkit/text-recognition（Apache-2.0）は本一覧に別途自動収集されています。
-
-ML Kit の利用にあたっては、Apache License 2.0 に加えて Google の
-API 利用規約（https://developers.google.com/terms）およびML Kit の
-利用規約（https://developers.google.com/ml-kit/terms）が適用されます。
-社内配布であっても、これらの規約の確認は配布者の責任で行ってください。
-
-${APACHE_2_0_TEXT}`,
   },
   {
     name: 'zxing-cpp (zxing_reader.wasm)',

@@ -17,10 +17,9 @@ import type { NormalizedRect } from './types'
 
 export type CropSize = { width: number; height: number; scale: number }
 
-// 約2.5メガピクセル。OCR_PIXEL_BUDGET（文字認識用、30万px）よりずっと大きく
-// 取ってある。バーコードのバーは1px単位の情報量を持つため、文字認識向けの
-// 予算のように大きく削ると読めなくなる。10fpsで解析し続けても重くならない
-// 範囲で、かつ狭い枠なら等倍のまま収まるよう、この値を選んでいる。
+// 約2.5メガピクセル。バーコードのバーは1px単位の情報量を持つため、大きく
+// 削ると読めなくなる。10fpsで解析し続けても重くならない範囲で、かつ狭い枠なら
+// 等倍のまま収まるよう、この値を選んでいる。
 export const CROP_PIXEL_BUDGET_PX = 2_500_000
 
 /**

@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@capacitor-mlkit/text-recognition':
-        specifier: ^8.2.0
-        version: 8.2.0(@capacitor/core@8.5.1)
       '@capacitor/android':
         specifier: ^8.5.1
         version: 8.5.1(@capacitor/core@8.5.1)
@@ -584,11 +581,6 @@ packages:
   '@babel/types@7.29.8':
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
-
-  '@capacitor-mlkit/text-recognition@8.2.0':
-    resolution: {integrity: sha512-JFrL8R0Ku3HAxPoEfdg1uNqL0WIdsqfMBrfC6CzKA5MIRZy736zxQkKd79x35T/h9JInPzBxI6Fnno0G4LAfSw==}
-    peerDependencies:
-      '@capacitor/core': '>=8.0.0'
 
   '@capacitor/android@8.5.1':
     resolution: {integrity: sha512-o8fUIPDSEASeXHHrDz26WU7OlyiRb+QqtI9KFdnLS1jUL77o5iGrvegibaZX8rWpiCyDJ6jlUhhhHlfeq3ou9A==}
@@ -3455,10 +3447,6 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
-
-  '@capacitor-mlkit/text-recognition@8.2.0(@capacitor/core@8.5.1)':
-    dependencies:
-      '@capacitor/core': 8.5.1
 
   '@capacitor/android@8.5.1(@capacitor/core@8.5.1)':
     dependencies:

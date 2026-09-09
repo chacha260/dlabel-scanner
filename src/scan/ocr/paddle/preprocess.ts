@@ -6,8 +6,7 @@
 // 切り出し）だけを行う。ブラウザ標準のdrawImageによる補間（バイリニア相当）に
 // 任せており、自前でリサンプリングアルゴリズムを実装していない。
 //
-// mlkit.tsと同様、OffscreenCanvasを使う（Capacitor WebView・主要ブラウザの
-// いずれでも利用可能）。
+// OffscreenCanvasを使う（Capacitor WebView・主要ブラウザのいずれでも利用可能）。
 
 import type { AxisAlignedBox } from './geometry'
 

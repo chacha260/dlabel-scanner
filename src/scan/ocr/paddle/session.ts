@@ -113,8 +113,7 @@ export function isPaddleReady(): boolean {
  * 選んだ時点で先に呼べるようにしておく。
  *
  * 失敗してもrejectせず{ ok: false, error }を返す（呼び出し側がvoidで
- * 呼び捨てにするため。mlkit.tsは例外を投げる方針だが、こちらは仕様として
- * 明示的に非rejectが指定されているため、それに合わせる）。
+ * 呼び捨てにするため。仕様として明示的に非rejectが指定されている）。
  * 失敗した場合はloadingPromiseをクリアし、次回の呼び出しで再度読み込みを
  * 試みられるようにする（一時的なネットワーク不調などから回復できるように）。
  */
@@ -148,11 +147,9 @@ export function getPaddleSessionOrThrow(): PaddleSession {
   return session
 }
 
-/** セッションを破棄する（メモリ解放用）。 */
-export async function disposePaddle(): Promise<void> {
-  const current = session
-  session = null
-  loadingPromise = null
-  if (!current) return
-  await Promise.all([current.det.release(), current.rec.release()])
-}
+// 以前はここに、セッションを破棄してメモリを解放する disposePaddle() があったが、
+// 呼び出し元がどこにも無かった（このアプリはOCRエンジンを一度読み込んだら
+// 画面を閉じるまで保持し続ける設計で、途中で明示的に解放する場面が無い）ため、
+// 利用者の判断で削除した。セッション解放自体が将来必要になった場合は、
+// git 履歴から `current.det.release()` / `current.rec.release()` を呼ぶ実装を
+// 復元できる。
